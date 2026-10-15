@@ -2,6 +2,8 @@ import type { Payment } from "../../../../packages/core/src/index.ts";
 
 /** The pool wallet. Real impl: zingo-cli. Test impl: MockChain. */
 export interface WalletAdapter {
+  /** Called once at the start of every engine tick (e.g. to sync once, then reuse). */
+  beginTick?(): Promise<void>;
   height(): Promise<number>;
   /** Shielded payments received at heights > sinceHeight, with memos. */
   incoming(sinceHeight: number): Promise<Payment[]>;

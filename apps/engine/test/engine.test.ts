@@ -10,7 +10,7 @@ function setup() {
   const chain = new MockChain(1000);
   const market = new MockZilkroad(chain);
   const engine = new Engine(
-    initialState({ startHeight: 1000, poolAddress: "u1pool", poolZilkroadAddress: "u1pool", uivk: "uivk", params: P }),
+    initialState({ startHeight: 1000, poolAddress: "u1pool", poolZilkroadAddress: "u1pool", viewingKey: "uview1test", params: P }),
     { wallet: chain, chain, market },
   );
   return { chain, market, engine };

@@ -13,7 +13,7 @@ A daily, privacy-preserving draw for one zkSNARK. People buy 0.1 ZEC tickets wit
 **Goals**
 - **No identities.** The operator never learns who bought a ticket or who won. There are no accounts, cookies, analytics or third-party requests.
 - **Verifiable.** Anyone can check the pot, the ticket list, the draw and the delivery without trusting the operator.
-- **Simple to use.** One shielded payment from Zodl or any Orchard wallet. Scanning a QR code is the whole entry.
+- **Simple to use.** One shielded payment from Zodl or any Ironwood-ready wallet. Scanning a QR code is the whole entry.
 - **Demo-able end to end.** A real mainnet round runs before submission, plus a mock mode for judges.
 
 **Non-goals (v1)**
@@ -25,7 +25,9 @@ A daily, privacy-preserving draw for one zkSNARK. People buy 0.1 ZEC tickets wit
 
 | Term | Meaning |
 |---|---|
-| Pool wallet | The operator's Orchard-only wallet that receives ticket payments and pays Zilkroad |
+| Inbox wallet | Receives ticket payments. Its unified **full** viewing key is published. Its only outgoing transactions are sweeps to the ops wallet |
+| Ops wallet | Private. Pays Zilkroad and withdrawals |
+| Ironwood | The shielded pool introduced by NU6.3 (mainnet block 3,428,143, 28 Jul 2026). A unified address's Orchard receiver *is* its Ironwood receiver, and ordinary payments to it land as Ironwood notes |
 | Ticket key | An Ed25519 key pair made in the buyer's browser. The public key goes in the memo; the secret key is the **ticket code** the buyer keeps |
 | Round | One draw cycle, bounded by block heights |
 | Pot | ZEC held for the current round, including carried-over surplus |
@@ -78,7 +80,7 @@ A daily, privacy-preserving draw for one zkSNARK. People buy 0.1 ZEC tickets wit
 6. **Pay the pot.** The user pays from their own shielded balance with the normal QR flow (§3.1).
 
 **Why not swap straight into the pot?**
-- The pool's UIVK is public, so its incoming txids are public.
+- The inbox's viewing key is public, so its incoming txids are public.
 - The bridge's ZEC payout transaction has public transparent inputs. Its timing and amount match the public USDC deposit, and 1Click records it.
 - Together, that would let anyone tie the EVM or Solana wallet to the ticket. Under the rules, that's a disqualifying leak.
 - With the two-hop design, the swap only shows that "this wallet bought ZEC into some shielded address". The z→z payment to the pot reveals nothing about where it came from.
@@ -180,22 +182,24 @@ winner = BigInt("0x" + seed) mod N
 ## 5. Transparency
 
 - **Published at launch:**
-  - The pool's unified address (Orchard receiver only).
-  - The pool's **unified incoming viewing key (UIVK)**. Anyone can import it into a view-only wallet and see every payment received: amounts, memos and txids. They can't see senders, and they can't spend.
+  - The inbox's unified address (Orchard/Ironwood receiver only, no Sapling or transparent).
+  - The inbox's **unified full viewing key (UFVK)**. Anyone can load it into a view-only wallet (`zingo-cli --viewkey`, or any UFVK-capable wallet) and see every ticket payment (amount, memo, txid, never the sender) plus the inbox's only outgoing transactions, the sweeps to the ops wallet. They can't spend.
+  - **Why two wallets?** zingolib always sends with the outgoing viewing key enabled (`OvkPolicy::Sender`). A single published UFVK would therefore expose where withdrawals went. Also, zingo-cli can't import an incoming-only key (UIVK), which would make the transparency hard to use. Keeping every user-facing payout in the private ops wallet solves both.
 - **Round files:** each round is published as `/data/rounds/<r>.json`, containing params, heights, ticket lines, listHash, seed block hash, winner index, purchase record and claim record.
 - **Verifier:** `npm run verify -- <r>` recomputes listHash and the winner from the round file. The site has the same verifier in-browser, with links to the seed block on an explorer.
-- **Outgoing payments are not shown by the UIVK.** Purchases are evidenced instead by Zilkroad's public provenance (`order_paid` / `transfer` events on the zkSNARK) and the published payment txid.
+- **Ops payments are not public.** Purchases are evidenced instead by Zilkroad's public provenance (`order_paid` / `transfer` events on the zkSNARK) and the published payment txid. Withdrawals are evidenced by the `withdrawn` records and their txids. Their destinations stay private.
 
 ## 6. Privacy analysis
 
 | What | Who learns it | Mitigation |
 |---|---|---|
-| Who bought a ticket | Nobody, if paid from shielded funds | Orchard-only pool address. UI warns against transparent payments |
+| Who bought a ticket | Nobody, if paid from shielded funds | Shielded-only pool address. UI warns against transparent payments. Payers still holding legacy Orchard funds should migrate them to Ironwood first, because crossing the ZIP 318 turnstile in the same transaction publishes the amount |
 | Links between one person's tickets | Nobody, because each purchase uses a fresh key | Keys are never reused. The "buy again" flow always makes a new key |
 | Ticket ↔ site visitor | Nobody | Static site, no logs, no cookies, no analytics, fonts self-hosted. Ticket lookups run client-side |
 | Winner's identity | Nobody; the operator learns only a Zilkroad account ID | Recommend a fresh Zilkroad account. The claim POST carries only {round, ticket, to, sig} |
 | Winner's account ID | Public, in the round file and on Zilkroad provenance | Needed so anyone can verify delivery. It's a pseudonym, so use a fresh one |
-| Amount patterns | Observers of the UIVK see amounts, which are multiples of 0.1 | Fixed denominations keep amounts uninformative |
+| Amount patterns | Holders of the inbox UFVK see amounts, which are multiples of 0.1 | Fixed denominations keep amounts uninformative |
+| Withdrawal destinations | Operator only (ops wallet) | Payouts come from the private ops wallet, never the published inbox |
 | Claim-time IP | Operator's HTTP endpoint | No request logging. Documented as Tor-friendly |
 | Withdrawal address | Operator only | Shielded addresses only. Never published. The UI recommends a fresh address |
 | That a key withdrew | Public: its ticket lines appear under `withdrawn` | The key is a one-time pseudonym, so this reveals nothing about the person |
@@ -229,7 +233,8 @@ snarkpot/
   packages/core     pure TS, shared by engine, web and verifier
                     ticket memo · ticket list · listHash · draw · claim msg · sign/verify · target math
   apps/engine       Node service, one process
-                    adapters/wallet   WalletAdapter: zingo-cli (real) | mock
+                    adapters/zingo    ZingoPool (inbox + ops zingo-cli wallets) · LightwalletdChain (gRPC GetBlock)
+                    adapters/mock     MockChain for tests and the demo
                     adapters/chain    block hash by height: lightwalletd | mock
                     adapters/zilkroad ZilkroadClient: http (cookie) | mock | manual
                     rounds.ts         state machine: open → closed → rolled | drawn → purchased → claimed
@@ -239,7 +244,23 @@ snarkpot/
   apps/web          static site (esbuild). Buy, my tickets, rounds, verify, claim
 ```
 
-**Wallet:** zingo-cli (zingolib) against `https://zec.rocks:443`, called one command at a time with `--waitsync`. Its exact command names and output format still need to be verified on day 1. If zingo-cli doesn't work out, write a small Rust sidecar on `zcash_client_backend` + `zcash_client_sqlite` behind the same `WalletAdapter` interface.
+**Wallet:** two zingo-cli wallets (zingolib, Oct 2026), driven one command per process:
+`zingo-cli --data-dir D --server https://zec.rocks:443 [--waitsync|--nosync] <command>`.
+JSON comes out on stdout and notices on stderr. Each wallet syncs once per tick (`--waitsync`), and later calls in that tick use `--nosync`.
+
+| Need | zingo-cli command | Output used |
+|---|---|---|
+| Chain height | `height` | `{height}` |
+| Ticket payments | `notes all` | `ironwood_notes[]` / `orchard_notes[]`: `{value, status: "confirmed at block height N", memo, txid, output_index, scope}`. Only `scope == "external"` and confirmed notes count. Change is `internal` |
+| Sweep inbox → ops | `max_send_value <ops>` then `quicksend <ops> <zats> "SNARKPOT1 sweep"` | `{max_send_value}`, `{txids}` |
+| Pay (Zilkroad, withdrawals) | `quicksend <addr> <zats> "<memo>"` on ops | `{txids}` |
+| Spendable | `spendable_balance` on ops | `{spendable_balance}` |
+| Viewing key | `export_ufvk` on inbox | `{ufvk, birthday}` |
+
+- **Ticket line `outIndex`:** the note's `output_index` for Ironwood notes, or `10000 + output_index` for legacy Orchard notes, which only exist from before NU6.3.
+- **Short ops balance:** when ops can't cover a payment plus fee headroom, `send` sweeps the inbox and the engine retries once the sweep confirms.
+
+**Draw seed block hash:** taken from the same lightwalletd server over gRPC with `CompactTxStreamer.GetBlock(BlockID{height})`. `CompactBlock.hash` is in internal byte order and is reversed to explorer display order. `npm run blockhash -- <h>` prints it so the operator can compare it with an explorer once, by eye.
 
 **WalletAdapter**
 ```ts
@@ -262,7 +283,7 @@ balance(): Promise<{spendableZats}>
 | Days | Work |
 |---|---|
 | 15–16 | Repo, core lib and tests, mock end-to-end simulate (**done in the scaffold**). Ask Zilkroad about API access |
-| 16–18 | zingo-cli adapter: build, create the pool wallet, export the UIVK, parse incoming memos, send with memo. Test with small mainnet amounts |
+| 16–18 | zingo-cli adapter (✅ done 15 Oct: ZingoPool + LightwalletdChain, tested against zingolib's output shapes and a local gRPC server). Operator: build zingo-cli on the Mac, create inbox and ops wallets, then a small mainnet test |
 | 18–19 | Chain adapter (block hash), real round timing, persistence |
 | 19–21 | Zilkroad http client: listings, orders, payment, transfers. Manual-mode fallback |
 | 21–24 | Web: buy flow (QR / ZIP-321), ticket-code UX, my tickets, rounds, verifier, claim. Design pass |
@@ -274,8 +295,8 @@ balance(): Promise<{spendableZats}>
 - **Legal.** A paid-entry draw for a prize is a lottery. Most places restrict lotteries, and running one without a licence is often an offence. Keep the hackathon version a small demo. Get legal advice before any public launch.
 - **Zilkroad API changes or refusal.** Mitigated by manual mode and by the adapter boundary.
 - **Session expiry or CAPTCHA.** The operator re-signs in by hand, and the engine alerts.
-- **Custody.** The operator wallet is a hot wallet. Keep a small balance, publish the UIVK, and purchase promptly.
-- **zingo-cli surprises.** The Rust sidecar is the fallback. The adapter interface keeps the rest unaffected.
+- **Custody.** The inbox and ops wallets are hot wallets. Keep balances small, publish the inbox UFVK, and purchase promptly.
+- **zingo-cli changes.** It's evolving fast (Ironwood, mixnet). Pin the zingolib commit you built from. The fallback is a Rust sidecar on `zcash_client_backend` behind the same `WalletAdapter` interface.
 - **Floor spikes after the draw.** The 5% buffer helps. Otherwise the round waits in `purchase_pending` and retries.
 
 ## 11. Judging fit

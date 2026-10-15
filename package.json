@@ -15,9 +15,13 @@
     "dev": "npm run build:web && node --import tsx apps/engine/src/cli.ts serve",
     "simulate": "node --import tsx apps/engine/src/cli.ts simulate",
     "tick": "node --import tsx apps/engine/src/cli.ts tick",
-    "verify": "node --import tsx apps/engine/src/cli.ts verify"
+    "verify": "node --import tsx apps/engine/src/cli.ts verify",
+    "serve": "npm run build:web && node --import tsx apps/engine/src/cli.ts serve",
+    "blockhash": "node --import tsx apps/engine/src/cli.ts blockhash"
   },
   "dependencies": {
+    "@grpc/grpc-js": "1.13.4",
+    "@grpc/proto-loader": "0.7.15",
     "@noble/curves": "1.9.7",
     "@noble/hashes": "1.8.0",
     "@scure/base": "1.2.6",

@@ -40,7 +40,9 @@ export interface EngineState {
   params: Params;
   poolAddress: string;
   poolZilkroadAddress: string;
-  uivk: string;
+  viewingKey: string;
+  /** "mock" shows the demo controls on the site. */
+  mode: "mock" | "live";
   scannedHeight: number;
   rounds: InternalRound[];
   bonusSnarkIds: number[];
@@ -75,8 +77,10 @@ export function initialState(opts: {
   startHeight: number;
   poolAddress: string;
   poolZilkroadAddress: string;
-  uivk: string;
+  /** The INBOX wallet's unified full viewing key (published). */
+  viewingKey: string;
   params?: Params;
+  mode?: "mock" | "live";
 }): EngineState {
   const params = opts.params ?? DEFAULT_PARAMS;
   return {
@@ -84,7 +88,8 @@ export function initialState(opts: {
     params,
     poolAddress: opts.poolAddress,
     poolZilkroadAddress: opts.poolZilkroadAddress,
-    uivk: opts.uivk,
+    viewingKey: opts.viewingKey,
+    mode: opts.mode ?? "live",
     scannedHeight: opts.startHeight,
     rounds: [newRound(1, opts.startHeight, params, [], 0)],
     bonusSnarkIds: [],
@@ -140,6 +145,7 @@ export class Engine {
   }
 
   async tick(): Promise<void> {
+    await this.deps.wallet.beginTick?.();
     const tip = await this.deps.wallet.height();
     try {
       this.state.lastFloorZats = await this.deps.market.floorZats();
@@ -356,7 +362,8 @@ export class Engine {
       protocol: "SNARKPOT1",
       params: this.p,
       poolAddress: this.state.poolAddress,
-      uivk: this.state.uivk,
+      viewingKey: this.state.viewingKey,
+      mode: this.state.mode,
       floorZats: floor,
       open: {
         round: open.round,

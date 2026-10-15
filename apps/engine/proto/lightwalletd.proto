@@ -1,0 +1,25 @@
+// Minimal subset of the lightwalletd protocol (github.com/zcash/lightwallet-protocol,
+// walletrpc/service.proto + compact_formats.proto, MIT). Only what the draw needs:
+// the latest height and a block's hash. Unknown fields in responses are ignored.
+syntax = "proto3";
+package cash.z.wallet.sdk.rpc;
+
+message BlockID {
+  uint64 height = 1;
+  bytes hash = 2;
+}
+
+message ChainSpec {}
+
+message CompactBlock {
+  reserved 1;
+  uint64 height = 2;
+  bytes hash = 3;     // internal byte order; reversed for display
+  bytes prevHash = 4;
+  uint32 time = 5;
+}
+
+service CompactTxStreamer {
+  rpc GetLatestBlock(ChainSpec) returns (BlockID) {}
+  rpc GetBlock(BlockID) returns (CompactBlock) {}
+}

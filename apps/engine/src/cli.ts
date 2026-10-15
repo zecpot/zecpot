@@ -1,7 +1,9 @@
 /**
  *   npm run dev                 web + engine on a mock chain (demo buttons enabled)
  *   npm run simulate            scripted end-to-end run on the mock chain
- *   npm run tick                one live tick (SNARKPOT_MODE=live; needs real adapters)
+ *   SNARKPOT_MODE=live npm run serve   live: site + API + a tick every 60 s (see README "Going live")
+ *   npm run tick                one live tick, then exit
+ *   npm run blockhash -- <h>    print a block hash from lightwalletd (compare with an explorer)
  *   npm run verify -- <n|file>  re-check a published round
  */
 import { readFile } from "node:fs/promises";
@@ -19,7 +21,7 @@ import {
 } from "../../../packages/core/src/index.ts";
 import { MockChain, MockZilkroad } from "./adapters/mock.ts";
 import { HttpZilkroad } from "./adapters/zilkroad-http.ts";
-import { ExplorerChain, ZingoWallet } from "./adapters/zingo.ts";
+import { LightwalletdChain, ZingoCli, ZingoPool } from "./adapters/zingo.ts";
 import { Engine, initialState, parseLine } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { loadState, publish, saveState } from "./store.ts";
@@ -40,7 +42,8 @@ function mockEngine() {
     startHeight: chain.tip,
     poolAddress: "u1mockpoolorchardonlyaddressxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     poolZilkroadAddress: "u1mockpoolzilkroad",
-    uivk: "uivk1mock-publish-the-real-one-here",
+    viewingKey: "uview1mock-the-inbox-wallet-ufvk-goes-here",
+    mode: "mock",
     params: MOCK_PARAMS,
   });
   return { chain, market, engine: new Engine(state, { wallet: chain, chain, market }) };
@@ -134,31 +137,100 @@ async function serveMock() {
   console.log(`SNARKPOT (mock chain) → http://localhost:${port}`);
 }
 
+const env = (k: string) => {
+  const v = process.env[k];
+  if (!v) throw new Error(`missing env ${k} (see README "Going live")`);
+  return v;
+};
+const LIGHTWALLETD = () => process.env.LIGHTWALLETD ?? "https://zec.rocks:443";
+
 async function liveEngine() {
-  const env = (k: string) => {
-    const v = process.env[k];
-    if (!v) throw new Error(`missing env ${k} (see README)`);
-    return v;
-  };
-  const wallet = new ZingoWallet({ bin: env("ZINGO_BIN"), dataDir: env("ZINGO_DATA_DIR"), server: process.env.LIGHTWALLETD ?? "https://zec.rocks:443" });
+  const bin = env("ZINGO_BIN");
+  const server = LIGHTWALLETD();
+  const wallet = new ZingoPool(
+    new ZingoCli({ bin, dataDir: env("INBOX_DATA_DIR"), server }),
+    new ZingoCli({ bin, dataDir: env("OPS_DATA_DIR"), server }),
+    env("OPS_ADDRESS"),
+  );
   const market = new HttpZilkroad(env("ZILKROAD_COOKIE"));
-  const state =
-    (await loadState(STATE)) ??
-    initialState({
+  let state = await loadState(STATE);
+  if (!state) {
+    await wallet.beginTick();
+    state = initialState({
       startHeight: await wallet.height(),
       poolAddress: env("POOL_ADDRESS"),
       poolZilkroadAddress: env("POOL_ZILKROAD_ADDRESS"),
-      uivk: env("POOL_UIVK"),
+      viewingKey: env("POOL_VIEWING_KEY"),
     });
-  return new Engine(state, { wallet, chain: new ExplorerChain(), market });
+  }
+  return new Engine(state, { wallet, chain: new LightwalletdChain(server), market });
+}
+
+/** Serialises ticks and API mutations so state is never changed mid-tick. */
+function serial() {
+  let chain = Promise.resolve();
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = chain.then(fn);
+    chain = next.then(() => undefined, () => undefined);
+    return next;
+  };
+}
+
+async function tickOnce(engine: Engine) {
+  await engine.tick();
+  await saveState(STATE, engine.state);
+  await publish(DATA, engine);
 }
 
 async function tickLive() {
   const engine = await liveEngine();
-  await engine.tick();
-  await saveState(STATE, engine.state);
-  await publish(DATA, engine);
+  await tickOnce(engine);
   for (const l of engine.state.log.slice(-10)) console.log(l.at, l.msg);
+}
+
+/** Live: one process runs the site, the API and a tick every TICK_SECONDS (default 60). */
+async function serveLive() {
+  const engine = await liveEngine();
+  const run = serial();
+  const port = Number(process.env.PORT ?? 8787);
+  const every = Number(process.env.TICK_SECONDS ?? 60) * 1000;
+  const loop = () =>
+    run(() => tickOnce(engine))
+      .catch((e) => console.error(new Date().toISOString(), "tick failed:", (e as Error).message))
+      .finally(() => setTimeout(loop, every));
+  loop();
+  const mutate = (fn: () => { ok: boolean }) =>
+    run(async () => {
+      const out = fn();
+      if (out.ok) {
+        await saveState(STATE, engine.state);
+        await publish(DATA, engine);
+      }
+      return { status: out.ok ? 200 : 400, json: out };
+    });
+  startServer({
+    port,
+    webDir: WEB,
+    dataDir: DATA,
+    post: {
+      "/api/claim": async (b) => {
+        const { round, ticket, to, sig } = b as { round: number; ticket: number; to: string; sig: string };
+        return mutate(() => engine.submitClaim(Number(round), Number(ticket), String(to), String(sig)));
+      },
+      "/api/withdraw": async (b) => {
+        const { round, pk, to, sig } = b as { round: number; pk: string; to: string; sig: string };
+        return mutate(() => engine.submitWithdraw(Number(round), String(pk), String(to), String(sig)));
+      },
+    },
+  });
+  console.log(`SNARKPOT (live, ${LIGHTWALLETD()}) → http://localhost:${port}`);
+}
+
+/** Operator check: print a block hash from lightwalletd to compare with an explorer by eye. */
+async function blockhash(arg?: string) {
+  if (!arg || !/^\d+$/.test(arg)) throw new Error("usage: npm run blockhash -- <height>");
+  console.log(await new LightwalletdChain(LIGHTWALLETD()).blockHash(Number(arg)));
+  process.exit(0);
 }
 
 async function verify(arg?: string) {
@@ -175,11 +247,12 @@ const [cmd, arg] = process.argv.slice(2);
 const live = process.env.SNARKPOT_MODE === "live";
 const cmds: Record<string, () => Promise<void>> = {
   simulate,
-  serve: live ? async () => { throw new Error("live serve: run `npm run tick` on a 60s timer + a static host; see README"); } : serveMock,
+  serve: live ? serveLive : serveMock,
   tick: tickLive,
   verify: () => verify(arg),
+  blockhash: () => blockhash(arg),
 };
-(cmds[cmd ?? ""] ?? (async () => console.log("commands: serve | simulate | tick | verify <n>")))().catch((e) => {
+(cmds[cmd ?? ""] ?? (async () => console.log("commands: serve | simulate | tick | verify <n> | blockhash <h>")))().catch((e) => {
   console.error(e instanceof Error ? e.message : e);
   process.exit(1);
 });

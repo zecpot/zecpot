@@ -18,7 +18,8 @@ import {
 interface PublicState {
   params: { ticketZats: number; roundBlocks: number };
   poolAddress: string;
-  uivk: string;
+  viewingKey: string;
+  mode: "mock" | "live";
   floorZats: number | null;
   scannedHeight: number;
   open: { round: number; closeHeight: number; potZats: number; tickets: number; targetZats: number | null; ticketsNeeded: number | null };
@@ -76,7 +77,7 @@ function eta(blocks: number) {
   return mins < 90 ? `about ${mins} min` : `about ${Math.round(mins / 60)} h`;
 }
 
-const isMock = () => !!state?.uivk.startsWith("uivk1mock");
+const isMock = () => state?.mode === "mock";
 
 /* ---------------- render ---------------- */
 
@@ -117,7 +118,7 @@ function renderHero(s: PublicState) {
     `. Round closes in ${eta(blocksLeft)}.`,
   );
   $("round-meta").textContent = `Round ${s.open.round}, closes at block ${s.open.closeHeight.toLocaleString("en")}`;
-  $("uivk").textContent = s.uivk;
+  $("viewing-key").textContent = s.viewingKey;
   $("mock-panel").hidden = !isMock();
   $("mock-pay").hidden = !isMock();
 }
@@ -356,7 +357,7 @@ document.addEventListener("DOMContentLoaded", () => {
     URL.revokeObjectURL(a.href);
   });
   $("copy-uri").addEventListener("click", () => pending && copy(pending.uri, "Payment link"));
-  $("copy-uivk").addEventListener("click", () => state && copy(state.uivk, "Viewing key"));
+  $("copy-viewing-key").addEventListener("click", () => state && copy(state.viewingKey, "Viewing key"));
   $("check-form").addEventListener("submit", check);
 
   $("mock-pay").addEventListener("click", async () => {

@@ -48,30 +48,35 @@ npm run verify -- 2  # re-check a published round file (var/data/rounds/2.json)
 | Engine: rounds, rollover, draw, purchase retry, refunds, claims, expiry → bonus, withdraw-or-roll | ✅ done on the mock chain |
 | Web: buy (QR / ZIP-321), ticket code, client-side check, withdraw, claim, in-browser verify | ✅ done on the mock chain |
 | Web: swap USDC/USDT → ZEC via NEAR Intents (Phantom / MetaMask / manual) | 🟡 built and tested with simulated wallets and a mocked 1Click. Live quotes confirmed from a browser. A real-money test swap is still to do |
-| `ZingoWallet` (pool wallet over zingo-cli) | ⏳ skeleton. Command names and parsing still to fill in (SPEC §8) |
-| `ExplorerChain` (block hash) | ⏳ skeleton |
+| `ZingoPool` (inbox + ops wallets over zingo-cli) | ✅ written against zingolib's source (Oct 2026). Tested with zingo-cli's JSON shapes. Mainnet test pending on the operator's Mac |
+| `LightwalletdChain` (draw block hash over gRPC) | ✅ tested against a local gRPC server. Byte order to confirm once with `npm run blockhash` |
 | `HttpZilkroad` | 🟡 written against observed endpoints. Order response and status strings still unconfirmed |
-| Live operation | ⏳ needs the two adapters above, plus a Zilkroad session |
+| Live operation | ⏳ needs zingo-cli built on the Mac, wallets created, a Zilkroad session, then a small mainnet test |
 
 ## Going live (operator)
 
-1. Build zingo-cli and create the pool wallet. Use an Orchard-only unified address. Export its UIVK.
-2. Sign up on Zilkroad with the pool's shielded address. Sign in by hand in a browser and copy the session cookie. The engine does not and will not solve the Turnstile CAPTCHA.
-3. Set the environment:
+The live engine runs two zingo-cli wallets:
+- **inbox:** receives tickets. Its full viewing key is published.
+- **ops:** private. Pays Zilkroad and withdrawals.
+
+It reads draw block hashes from the same lightwalletd server over gRPC. SPEC §5 and §8 explain why.
+
+1. **Build zingo-cli** (on the Mac):
    ```sh
-   SNARKPOT_MODE=live
-   ZINGO_BIN=/path/to/zingo-cli
-   ZINGO_DATA_DIR=~/.snarkpot-wallet
-   LIGHTWALLETD=https://zec.rocks:443
-   POOL_ADDRESS=u1…
-   POOL_UIVK=uivk1…
-   POOL_ZILKROAD_ADDRESS=u1…
-   ZILKROAD_COOKIE='…'
+   brew install protobuf jq            # rustup too, if you don't have Rust
+   git clone https://github.com/zingolabs/zingolib && cd zingolib
+   cargo build --release --package zingo-cli   # rust-toolchain.toml pins Rust 1.99; rustup fetches it
+   export ZINGO_BIN=$PWD/target/release/zingo-cli
    ```
-4. Run `npm run tick` every 60 s (cron or launchd). Serve `apps/web/public` plus `var/data` from a static host with access logs off.
+   Note the zingolib commit you built from. The engine relies on its JSON output (SPEC §8).
+2. **Create the wallets:** `./tools/setup-pool.sh`. It prints both recovery phrases, so write them down offline. It also prints the `.env` values.
+3. **Zilkroad:** sign up with the **ops** address. Sign in by hand in a browser and put the session cookie in `ZILKROAD_COOKIE`. The engine does not and will not solve the Turnstile CAPTCHA.
+4. **Check byte order once:** `npm run blockhash -- <recent height>` must match the hash an explorer shows for that block.
+5. **Run:** `set -a; source .env; set +a; npm run serve`. This runs the site, the claim and withdraw API, and a tick every 60 s (`TICK_SECONDS`). For a public site, put it behind a host with access logs off.
+6. **First live test:** pay 0.1 ZEC with a ticket memo from Zodl. Within a few minutes it should show up in the round and in `var/data/state.json`.
 
 ## Known limits
 
-- **Custody.** The pool wallet holds the pot until the purchase. The published UIVK makes every incoming payment auditable. It does not remove the trust.
+- **Custody.** The inbox and ops wallets hold the pot until the purchase. The published inbox viewing key makes every ticket payment, and every sweep to ops, auditable. It does not remove the trust.
 - **Zilkroad endpoints are unofficial.** Ask @zilkroad_ for an API token. The fallback is manual mode, where the operator clicks buy and transfer on zilkroad.com.
 - **Legal.** A paid-entry draw for a prize is a lottery. In most places, running an unlicensed lottery is an offence. This is a hackathon demo, so get legal advice before running it publicly.
