@@ -1,0 +1,32 @@
+{
+  "name": "snarkpot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Daily private draw for one zkSNARK, paid with shielded ZEC. ZECATHON entry.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --import tsx --test packages/core/test/*.test.ts apps/engine/test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build:web": "node apps/web/build.mjs",
+    "dev": "npm run build:web && node --import tsx apps/engine/src/cli.ts serve",
+    "simulate": "node --import tsx apps/engine/src/cli.ts simulate",
+    "tick": "node --import tsx apps/engine/src/cli.ts tick",
+    "verify": "node --import tsx apps/engine/src/cli.ts verify"
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "1.8.0",
+    "qrcode-generator": "1.4.4"
+  },
+  "devDependencies": {
+    "@fontsource-variable/bricolage-grotesque": "5.2.10",
+    "@types/node": "22.18.0",
+    "esbuild": "0.25.10",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <title>SNARKPOT</title>
+  <meta name="description" content="A daily private draw for one zkSNARK, paid with shielded ZEC." />
+  <link rel="preload" href="/fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='9' width='24' height='14' rx='3' fill='%23F4B728'/%3E%3C/svg%3E" />
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <a class="mark" href="/">snarkpot</a>
+    <p class="round-meta" id="round-meta">Loading the current round…</p>
+  </header>
+
+  <main>
+    <section class="hero" aria-labelledby="hero-h">
+      <h1 id="hero-h"><span id="hero-line">Today’s zkSNARK is waiting for tickets.</span></h1>
+      <div class="slots" id="slots" role="img" aria-label="Ticket progress"></div>
+      <p class="hero-sub" id="hero-sub"></p>
+
+      <form class="buy-bar" id="buy-form">
+        <label for="count">Tickets</label>
+        <div class="stepper">
+          <button type="button" id="minus" aria-label="One fewer ticket">−</button>
+          <input id="count" name="count" type="number" inputmode="numeric" min="1" max="20" value="1" />
+          <button type="button" id="plus" aria-label="One more ticket">+</button>
+        </div>
+        <output id="price" for="count">0.1 ZEC</output>
+        <button type="submit" class="primary">Buy tickets</button>
+      </form>
+    </section>
+
+    <section class="panel" id="buy-panel" hidden aria-labelledby="buy-h">
+      <h2 id="buy-h">Your tickets are ready to pay for</h2>
+      <ol class="steps">
+        <li>
+          <h3>Save your ticket code</h3>
+          <p>This code is the only proof the tickets are yours. We never see it, and it can’t be recovered if you lose it.</p>
+          <div class="code-row">
+            <code id="ticket-code"></code>
+            <button type="button" id="copy-code">Copy</button>
+            <button type="button" id="download-code">Download</button>
+          </div>
+          <label class="check"><input type="checkbox" id="saved" /> I saved my ticket code</label>
+        </li>
+        <li id="pay-step" class="locked">
+          <h3>Pay from a shielded wallet</h3>
+          <p>Scan with Zodl or any Orchard wallet. The memo is already filled in; don’t change it, or the payment won’t become a ticket.</p>
+          <div class="pay">
+            <div class="qr" id="qr" aria-label="Payment QR code"></div>
+            <div class="pay-detail">
+              <p class="amount" id="pay-amount"></p>
+              <a class="primary" id="pay-link" href="#">Open in wallet</a>
+              <button type="button" id="copy-uri">Copy payment link</button>
+              <p class="warn">Paying from a transparent (t-) address puts you on the public chain. Pay from your shielded balance.</p>
+              <button type="button" id="mock-pay" class="mock" hidden>Simulate this payment</button>
+            </div>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <div class="cols">
+      <section class="panel" aria-labelledby="mine-h">
+        <h2 id="mine-h">Check your tickets</h2>
+        <p>Paste your ticket code. The check runs in this browser; your code never leaves it.</p>
+        <form id="check-form" class="inline">
+          <input id="check-code" placeholder="spk1…" autocomplete="off" spellcheck="false" aria-label="Ticket code" />
+          <button type="submit">Check</button>
+        </form>
+        <div id="check-out" aria-live="polite"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="past-h">
+        <h2 id="past-h">Past draws</h2>
+        <ul class="past" id="past"></ul>
+      </section>
+    </div>
+
+    <section class="panel how" aria-labelledby="how-h">
+      <h2 id="how-h">How it stays private and fair</h2>
+      <dl>
+        <dt>No accounts</dt>
+        <dd>A ticket is a key made in your browser. Its public half rides in the payment memo; the secret half is your ticket code.</dd>
+        <dt>No sender data</dt>
+        <dd>Shielded payments hide who paid. The pool sees an amount and a memo, nothing else.</dd>
+        <dt>Anyone can audit the pot</dt>
+        <dd>The pool’s viewing key is public. Load it into a view-only wallet to see every ticket that came in.</dd>
+        <dt>Nobody picks the winner</dt>
+        <dd>The ticket list locks at the closing block. The winner comes from the hash of a block mined after that, so anyone can recompute it.</dd>
+        <dt>Delivery to a pseudonym</dt>
+        <dd>The winner signs a Zilkroad account ID with their ticket code. We buy the floor zkSNARK and send it there.</dd>
+      </dl>
+      <div class="key-row">
+        <span>Pool viewing key</span>
+        <code id="uivk"></code>
+        <button type="button" id="copy-uivk">Copy</button>
+      </div>
+    </section>
+
+    <section class="panel mock" id="mock-panel" hidden aria-labelledby="mock-h">
+      <h2 id="mock-h">Demo chain</h2>
+      <p>This server runs on a simulated chain. Use these to move it along.</p>
+      <div class="inline">
+        <button type="button" data-bots="5">Add 5 strangers’ tickets</button>
+        <button type="button" data-mine="10">Mine 10 blocks</button>
+        <button type="button" data-mine="40">Mine to the next round</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>Built for ZECATHON. Source and the full protocol are public; every draw can be checked with <code>npm run verify</code>.</p>
+  </footer>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
