@@ -61,7 +61,7 @@ A daily, privacy-preserving draw for one zkSNARK. People buy 0.1 ZEC tickets wit
 4. The engine removes all of that key's carried tickets from the open round, lowers the pot, and sends `n × 0.1 − fee` on the next tick.
 5. Once the round closes, its tickets are locked into it. If it draws, they're in the draw. If it rolls again, they can be withdrawn from the round after.
 
-### 3.5 No ZEC yet: swap stablecoins
+### 3.4 No ZEC yet: swap stablecoins
 **Supported sources:** USDC on Solana, Arbitrum, Base and Ethereum, plus USDT on Ethereum. Availability is live. On 15 Oct, Base USDC wasn't quotable, and the UI says so when that happens.
 
 **Flow:**
@@ -88,7 +88,7 @@ A daily, privacy-preserving draw for one zkSNARK. People buy 0.1 ZEC tickets wit
 
 **Cost:** about 1.7% on 15 Oct, for example 20 USDC → 0.01799 ZEC. That includes 1Click's +0.25% fee for unauthenticated calls. A partner key would remove that fee, but it would have to sit on a server, which would then see swaps, so we don't use one.
 
-### 3.4 Check a ticket
+### 3.5 Check a ticket
 - The site downloads the public round files and matches the ticket code's public key locally.
 - No request carries a key, so the server can't link a visitor to a ticket.
 

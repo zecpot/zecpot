@@ -1,7 +1,7 @@
 /**
  * "Get ZEC with stablecoins": quote → send from a connected wallet (or by
  * hand) → watch status. ZEC is delivered to the user's OWN shielded address;
- * paying the pot is a separate shielded payment (SPEC §3.5 explains why).
+ * paying the pot is a separate shielded payment (SPEC §3.4 explains why).
  */
 import { SHIELDED_ADDR_RE, zatsToZec, zecToZats } from "../../../../packages/core/src/index.ts";
 import { connectEvm, discoverEvmWallets, sendErc20, type EvmWallet } from "./evm.ts";
