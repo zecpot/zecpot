@@ -21,7 +21,7 @@ const TYPES: Record<string, string> = {
 
 const HEADERS = {
   "content-security-policy":
-    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' https://1click.chaindefuser.com https://api.mainnet-beta.solana.com; frame-ancestors 'none'; base-uri 'none'",
   "referrer-policy": "no-referrer",
   "x-content-type-options": "nosniff",
   "permissions-policy": "interest-cohort=()",

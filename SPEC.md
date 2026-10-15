@@ -61,6 +61,33 @@ A daily, privacy-preserving draw for one zkSNARK. People buy 0.1 ZEC tickets wit
 4. The engine removes all of that key's carried tickets from the open round, lowers the pot, and sends `n × 0.1 − fee` on the next tick.
 5. Once the round closes, its tickets are locked into it. If it draws, they're in the draw. If it rolls again, they can be withdrawn from the round after.
 
+### 3.5 No ZEC yet: swap stablecoins
+**Supported sources:** USDC on Solana, Arbitrum, Base and Ethereum, plus USDT on Ethereum. Availability is live. On 15 Oct, Base USDC wasn't quotable, and the UI says so when that happens.
+
+**Flow:**
+1. **Open the swap.** "No ZEC yet? Swap USDC or USDT" opens it. The ZEC amount defaults to the ticket count × 0.1 + 0.0002, the extra covering the fee on the later pot payment.
+2. **Fill it in.** The user picks a source, enters **their own** shielded Zcash address, and connects a wallet:
+   - Solana: Wallet Standard (Phantom, Solflare, Backpack).
+   - EVM: EIP-6963 (MetaMask, Rabby, Phantom, Coinbase Wallet).
+   - Or send manually from an exchange, with a refund address.
+3. **Quote.** The browser calls NEAR Intents 1Click **directly** with `POST /v0/quote`: `EXACT_OUTPUT` into `nep141:zec.omft.near`, recipient the user's shielded address, refund to the connected address on the source chain, 30-minute deadline.
+4. **Send.** "Send X USDC with Phantom":
+   - **Solana:** a hand-built legacy transaction with create-ATA-idempotent plus TransferChecked to the 1Click deposit address. The wallet signs and sends it. This is tested against `@solana/web3.js` and `@solana/spl-token`.
+   - **EVM:** `eth_sendTransaction` of an ERC-20 `transfer`, after switching to the right chain.
+5. **Track.** `POST /v0/deposit/submit`, then poll `GET /v0/status` until `SUCCESS`, `REFUNDED` or `FAILED`.
+6. **Pay the pot.** The user pays from their own shielded balance with the normal QR flow (§3.1).
+
+**Why not swap straight into the pot?**
+- The pool's UIVK is public, so its incoming txids are public.
+- The bridge's ZEC payout transaction has public transparent inputs. Its timing and amount match the public USDC deposit, and 1Click records it.
+- Together, that would let anyone tie the EVM or Solana wallet to the ticket. Under the rules, that's a disqualifying leak.
+- With the two-hop design, the swap only shows that "this wallet bought ZEC into some shielded address". The z→z payment to the pot reveals nothing about where it came from.
+- The UI advises swapping a little extra and waiting before paying, to blunt amount and timing matching.
+
+**Server involvement:** none. The SNARKPOT server never sees the swap. The CSP allows `connect-src` to `1click.chaindefuser.com` and `api.mainnet-beta.solana.com` (for the blockhash) only.
+
+**Cost:** about 1.7% on 15 Oct, for example 20 USDC → 0.01799 ZEC. That includes 1Click's +0.25% fee for unauthenticated calls. A partner key would remove that fee, but it would have to sit on a server, which would then see swaps, so we don't use one.
+
 ### 3.4 Check a ticket
 - The site downloads the public round files and matches the ticket code's public key locally.
 - No request carries a key, so the server can't link a visitor to a ticket.
@@ -172,6 +199,7 @@ winner = BigInt("0x" + seed) mod N
 | Claim-time IP | Operator's HTTP endpoint | No request logging. Documented as Tor-friendly |
 | Withdrawal address | Operator only | Shielded addresses only. Never published. The UI recommends a fresh address |
 | That a key withdrew | Public: its ticket lines appear under `withdrawn` | The key is a one-time pseudonym, so this reveals nothing about the person |
+| Stablecoin swap: source wallet ↔ the user's own Zcash address | Public chain + NEAR Intents | Swap goes to the user's own wallet, never to the pot. The pot payment is a separate z→z payment. The UI advises extra amount and a delay |
 
 Leaks are disqualifying under the rules, so the README will include this table and say plainly that custody is trusted (§1).
 

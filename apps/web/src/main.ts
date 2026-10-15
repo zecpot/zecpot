@@ -1,4 +1,5 @@
 import qrcode from "qrcode-generator";
+import { initSwap } from "./swap/ui.ts";
 import {
   keyFromCode,
   newTicketKey,
@@ -375,6 +376,9 @@ document.addEventListener("DOMContentLoaded", () => {
       await refresh();
     }),
   );
+
+  // Swap default: the tickets in the stepper + 0.0002 ZEC for the fee on the payment to the pot.
+  initSwap({ defaultZats: () => count() * (state?.params.ticketZats ?? 10_000_000) + 20_000, toast });
 
   refresh().then(updatePrice);
   setInterval(refresh, 10_000);

@@ -32,6 +32,7 @@
         </div>
         <output id="price" for="count">0.1 ZEC</output>
         <button type="submit" class="primary">Buy tickets</button>
+        <button type="button" class="link" id="open-swap">No ZEC yet? Swap USDC or USDT</button>
       </form>
     </section>
 
@@ -63,6 +64,24 @@
           </div>
         </li>
       </ol>
+    </section>
+
+    <section class="panel" id="swap-panel" hidden aria-labelledby="swap-h">
+      <h2 id="swap-h">Get ZEC with USDC or USDT</h2>
+      <p>Swap stablecoins into your own shielded Zcash wallet, then pay the pot from there. The swap goes through NEAR Intents straight from this page. Our server never sees it.</p>
+      <div class="sw-grid">
+        <label>Pay with <select id="sw-src"></select></label>
+        <label>ZEC to receive <input id="sw-zec" inputmode="decimal" autocomplete="off" /></label>
+        <label class="wide">Your shielded Zcash address <input id="sw-to" placeholder="u1…" autocomplete="off" spellcheck="false" /></label>
+      </div>
+      <div class="sw-wallet" id="sw-wallet"></div>
+      <details class="sw-manual">
+        <summary>Send from an exchange or another wallet</summary>
+        <label>Refund address on <span id="sw-refund-chain">Solana</span>, in case the swap fails <input id="sw-refund" autocomplete="off" spellcheck="false" /></label>
+      </details>
+      <button type="button" class="primary" id="sw-quote">Get quote</button>
+      <div id="sw-quote-out" aria-live="polite"></div>
+      <p class="note">This swap is public on the sending network, and NEAR Intents records which Zcash address it paid. Paying the pot afterwards is shielded and isn’t linked to the swap. To make the two harder to match up, swap a bit more than you need and wait a while before you pay.</p>
     </section>
 
     <div class="cols">
