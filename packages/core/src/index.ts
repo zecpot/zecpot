@@ -19,6 +19,8 @@ export interface Params {
   feeReserveZats: number;
   houseFeeBps: number;
   claimWindowBlocks: number;
+  /** ZIP-317 marginal fee; withdrawals pay feePerAction × max(2, notes + 1). */
+  feePerActionZats: number;
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -30,6 +32,7 @@ export const DEFAULT_PARAMS: Params = {
   feeReserveZats: 200_000,
   houseFeeBps: 0,
   claimWindowBlocks: 16_128,
+  feePerActionZats: 5_000,
 };
 
 /* ---------------- encoding helpers ---------------- */
@@ -213,6 +216,45 @@ export function verifyClaim(pk: string, round: number, ticket: number, to: strin
   }
 }
 
+/* ---------------- withdraw (unfilled rounds only, SPEC §4.7) ---------------- */
+
+/** Shielded only: a transparent destination would put the refund on the public chain. */
+export const SHIELDED_ADDR_RE = /^(u1[02-9ac-hj-np-z]{100,}|zs1[02-9ac-hj-np-z]{60,})$/;
+
+/**
+ * Network fee charged on a withdrawal of n tickets. Pool notes are often
+ * 0.1 ZEC each, so a payout may spend ~n notes; ZIP-317 charges per action,
+ * minimum 2. Conservative on purpose — any excess stays in the pot.
+ */
+export function withdrawFeeZats(tickets: number, params: Params = DEFAULT_PARAMS): number {
+  return params.feePerActionZats * Math.max(2, tickets + 1);
+}
+
+export function withdrawAmountZats(tickets: number, params: Params = DEFAULT_PARAMS): number {
+  return tickets * params.ticketZats - withdrawFeeZats(tickets, params);
+}
+
+/** Binds the open round, the ticket key, the destination and the exact payout. */
+export function withdrawMessage(round: number, pk: string, tickets: number, amountZats: number, to: string): string {
+  return `${PROTOCOL}|withdraw|round=${round}|pk=${pk}|tickets=${tickets}|amount=${amountZats}|to=${to}`;
+}
+
+export function signWithdraw(code: string, round: number, tickets: number, amountZats: number, to: string): string {
+  if (!SHIELDED_ADDR_RE.test(to)) throw new Error("use a shielded address starting with u1 or zs1");
+  const key = keyFromCode(code);
+  const sk = fromB64url(code.trim().slice(CODE_PREFIX.length));
+  return b64url(ed25519.sign(utf8ToBytes(withdrawMessage(round, key.pk, tickets, amountZats, to)), sk));
+}
+
+export function verifyWithdraw(pk: string, round: number, tickets: number, amountZats: number, to: string, sig: string): boolean {
+  if (!SHIELDED_ADDR_RE.test(to)) return false;
+  try {
+    return ed25519.verify(fromB64url(sig), utf8ToBytes(withdrawMessage(round, pk, tickets, amountZats, to)), fromB64url(pk));
+  } catch {
+    return false;
+  }
+}
+
 /* ---------------- public round record ---------------- */
 
 export type RoundStatus = "open" | "closed" | "rolled" | "drawn" | "purchase_pending" | "purchased" | "claimed" | "expired";
@@ -228,6 +270,10 @@ export interface RoundRecord {
   floorZatsAtClose?: number;
   targetZats?: number;
   tickets: string[]; // ticket lines in canonical order
+  /** The first `carriedCount` tickets came from earlier unfilled rounds (withdrawable while this round is open). */
+  carriedCount: number;
+  /** Carried tickets withdrawn during this round. Destination addresses are never published. */
+  withdrawn: { tickets: string[]; amountZats: number; feeZats: number; txid?: string }[];
   listHash?: string;
   seedBlockHash?: string;
   winner?: number;

@@ -3,7 +3,10 @@ import {
   keyFromCode,
   newTicketKey,
   signClaim,
+  signWithdraw,
   ticketMemo,
+  withdrawAmountZats,
+  withdrawFeeZats,
   verifyRound,
   zatsToZec,
   zip321Uri,
@@ -222,12 +225,30 @@ async function check(e: Event) {
   const rounds = await Promise.all(state.rounds.slice(-30).map((r) => getJSON<PubRound>(`/data/rounds/${r.round}.json`).catch(() => null)));
   // A carried ticket appears in several rounds; the latest one is its current state.
   const latest = new Map<string, { r: PubRound; idx: number }>();
+  const withdrawn: { round: number; n: number; amountZats: number; sent: boolean }[] = [];
+  const gone = new Set<string>();
+  for (const r of rounds) {
+    for (const w of r?.withdrawn ?? []) {
+      const mine = w.tickets.filter((l) => l.endsWith(":" + key.pk));
+      if (mine.length === 0) continue;
+      mine.forEach((l) => gone.add(l));
+      withdrawn.push({ round: r!.round, n: mine.length, amountZats: w.amountZats, sent: !!w.txid });
+    }
+  }
   for (const r of rounds) {
     if (!r) continue;
     r.tickets.forEach((line, idx) => {
-      if (line.endsWith(":" + key.pk)) latest.set(line.split(":").slice(0, 3).join(":"), { r, idx });
+      if (line.endsWith(":" + key.pk) && !gone.has(line)) latest.set(line.split(":").slice(0, 3).join(":"), { r, idx });
     });
   }
+  for (const w of withdrawn) {
+    const div = Object.assign(document.createElement("div"), { className: "result" });
+    div.append(Object.assign(document.createElement("p"), {
+      textContent: `${w.n} ticket${w.n === 1 ? "" : "s"} withdrawn in round ${w.round}. ${zatsToZec(w.amountZats)} ZEC ${w.sent ? "was sent" : "is being sent"} to the address you gave.`,
+    }));
+    out.append(div);
+  }
+  if (latest.size === 0 && withdrawn.length > 0) return;
   if (latest.size === 0) {
     out.textContent = "No tickets for this code yet. A payment shows up once it’s in a block, usually within a few minutes.";
     return;
@@ -244,7 +265,12 @@ async function check(e: Event) {
     const n = idxs.length;
     const head = document.createElement("p");
     const won = r.winner !== undefined && idxs.includes(r.winner);
-    if (r.status === "open") head.textContent = `${n} ticket${n === 1 ? "" : "s"} in round ${r.round}, which is still open.`;
+    const carried = idxs.filter((i) => i < (r.carriedCount ?? 0)).length;
+    if (r.status === "open" && carried > 0) {
+      head.textContent =
+        `${carried} ticket${carried === 1 ? "" : "s"} came from a round that didn’t fill, so ${carried === 1 ? "it’s" : "they’re"} in round ${r.round} automatically.` +
+        (n > carried ? ` You also have ${n - carried} new ticket${n - carried === 1 ? "" : "s"} here.` : "");
+    } else if (r.status === "open") head.textContent = `${n} ticket${n === 1 ? "" : "s"} in round ${r.round}, which is still open.`;
     else if (r.status === "rolled") head.textContent = `${n} ticket${n === 1 ? "" : "s"} carried forward from round ${r.round}.`;
     else if (r.status === "closed") head.textContent = `${n} ticket${n === 1 ? "" : "s"} in round ${r.round}. The draw happens a few blocks after closing.`;
     else if (!won) head.textContent = `${n} ticket${n === 1 ? "" : "s"} in round ${r.round}. Ticket ${r.winner} won this time.`;
@@ -254,9 +280,38 @@ async function check(e: Event) {
       if (r.status === "expired") head.append(" The claim window has closed.");
     }
     div.append(head);
+    if (r.status === "open" && carried > 0 && state) div.append(withdrawForm(key, r, carried));
     if (won && (r.status === "purchased" || r.status === "purchase_pending")) div.append(claimForm(key, r));
     out.append(div);
   }
+}
+
+function withdrawForm(key: TicketKey, r: PubRound, n: number) {
+  const amount = withdrawAmountZats(n, r.params);
+  const fee = withdrawFeeZats(n, r.params);
+  const f = document.createElement("form");
+  f.className = "claim";
+  f.innerHTML = `
+    <p class="hint">Do nothing and ${n === 1 ? "it stays" : "they stay"} in. Or take your ZEC back before block ${r.closeHeight.toLocaleString("en")}:
+    <strong>${zatsToZec(amount)} ZEC</strong> (${zatsToZec(n * r.params.ticketZats)} minus a ${zatsToZec(fee)} ZEC network fee).</p>
+    <label for="wto">Shielded address to receive it. A fresh one keeps the refund unlinked from your other payments.</label>
+    <div class="inline"><input id="wto" placeholder="u1…" autocomplete="off" spellcheck="false" />
+    <button type="submit">Withdraw ${zatsToZec(amount)} ZEC</button></div>
+    <p class="msg" aria-live="polite"></p>`;
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = f.querySelector(".msg")!;
+    const to = (f.querySelector("#wto") as HTMLInputElement).value.trim();
+    try {
+      const sig = signWithdraw(key.code, r.round, n, amount, to); // signed here; the code never leaves the browser
+      const res = await post("/api/withdraw", { round: r.round, pk: key.pk, to, sig });
+      msg.textContent = res.ok ? `Withdrawn. ${zatsToZec(amount)} ZEC is on its way to that address.` : `Withdrawal not accepted: ${res.error}.`;
+      if (res.ok) { f.querySelector("button")!.disabled = true; refresh(); }
+    } catch (err) {
+      msg.textContent = `Withdrawal not accepted: ${(err as Error).message}.`;
+    }
+  });
+  return f;
 }
 
 function claimForm(key: TicketKey, r: PubRound) {

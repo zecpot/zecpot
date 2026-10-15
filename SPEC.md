@@ -18,7 +18,7 @@ A daily, privacy-preserving draw for one zkSNARK. People buy 0.1 ZEC tickets wit
 
 **Non-goals (v1)**
 - Trustless custody. The operator holds the pot between payment and purchase. This is made auditable (§5), not removed.
-- Refunds. Rounds roll over instead (§4.4), because refunds would require return addresses.
+- Refunds for losing tickets in a drawn round. Their ZEC has paid for the prize. Only tickets from **unfilled** rounds can be withdrawn (§4.7).
 - Multiple collections or prize tiers.
 
 ## 2. Glossary
@@ -52,7 +52,16 @@ A daily, privacy-preserving draw for one zkSNARK. People buy 0.1 ZEC tickets wit
 4. The engine verifies the signature against the winning ticket's public key, transfers the zkSNARK, and publishes `{to, sig, transferAt}` in the round file.
 5. If no claim arrives within `CLAIM_WINDOW` (14 days), the held zkSNARK becomes a bonus second prize in the next drawn round.
 
-### 3.3 Check a ticket
+### 3.3 Pot didn't fill: withdraw or roll
+1. A round closes with `pot < target`. Its tickets move into the next round automatically (§4.4).
+2. **Doing nothing means staying in.** While that next round is open, the ticket check shows: "N tickets came from a round that didn't fill… Withdraw X ZEC".
+3. To withdraw, the user enters a **shielded** address (u1/zs1). We recommend a fresh one. The browser signs:
+   `SNARKPOT1|withdraw|round=<r>|pk=<pk>|tickets=<n>|amount=<zats>|to=<addr>`
+   and POSTs `{round, pk, to, sig}` to `/api/withdraw`.
+4. The engine removes all of that key's carried tickets from the open round, lowers the pot, and sends `n × 0.1 − fee` on the next tick.
+5. Once the round closes, its tickets are locked into it. If it draws, they're in the draw. If it rolls again, they can be withdrawn from the round after.
+
+### 3.4 Check a ticket
 - The site downloads the public round files and matches the ticket code's public key locally.
 - No request carries a key, so the server can't link a visitor to a ticket.
 
@@ -71,6 +80,7 @@ All amounts are integer zatoshis (1 ZEC = 1e8).
 | `FEE_RESERVE_ZATS` | 200,000 | 0.002 ZEC for network fees (ZIP-317) |
 | `HOUSE_FEE_BPS` | 0 | No operator cut in the hackathon version |
 | `CLAIM_WINDOW_BLOCKS` | 16,128 | About 14 days |
+| `FEE_PER_ACTION_ZATS` | 5,000 | ZIP-317 marginal fee. A withdrawal of n tickets is charged 5,000 × max(2, n+1) |
 
 ### 4.2 Tickets
 - **Memo format:** UTF-8 `SNARKPOT1 <pk>`, where `<pk>` is the 32-byte Ed25519 public key in base64url (43 chars). Trailing NULs and whitespace are ignored.
@@ -94,7 +104,7 @@ winner = BigInt("0x" + seed) mod N
 
 ### 4.4 Close outcomes
 - **`pot ≥ target` and N ≥ 1:** status `drawn`. All of the round's tickets are used up. After the purchase, the surplus `pot − price − fees` carries to the next round's pot.
-- **`pot < target`:** status `rolled`. Every ticket and the whole pot carry into round r+1. The site shows how many more tickets are needed: `ceil((target − pot) / TICKET_ZATS)`.
+- **`pot < target`:** status `rolled`. Every ticket and the whole pot carry into round r+1. The site shows how many more tickets are needed: `ceil((target − pot) / TICKET_ZATS)`. Carried tickets are listed first, and the round record gives their count as `carriedCount`. Their owners can withdraw them while r+1 is open (§4.7).
 - **Example (15 Oct):** floor 0.548 → target 0.548 × 1.05 + 0.002 = 0.5774 ZEC, so **6 tickets**.
 
 ### 4.5 Purchase
@@ -109,6 +119,36 @@ winner = BigInt("0x" + seed) mod N
 
 ### 4.6 Transfer
 - `POST /api/market/transfers {snarkId, toAccountId}`, sent after a valid claim (§3.2).
+
+### 4.7 Withdraw (unfilled rounds only)
+
+**Eligibility**
+- Only the **carried** tickets of the **currently open** round can be withdrawn.
+- Tickets bought fresh into the open round can't be withdrawn. Neither can tickets in a closed or drawn round.
+
+**Unit**
+- Withdrawals are per ticket key. All of a key's carried tickets go together, n tickets in total.
+
+**Amounts**
+- `fee = FEE_PER_ACTION_ZATS × max(2, n + 1)`.
+  - The pool holds many 0.1 ZEC notes, so a payout may spend about n notes, and ZIP-317 charges per action with a minimum of 2.
+  - It's set conservatively. Any excess over the real fee stays in the wallet as float.
+- `amount = n × TICKET_ZATS − fee`.
+- The open round's pot drops by `n × TICKET_ZATS`.
+
+**Signature**
+- Ed25519 by the ticket key over the withdraw message (§3.3).
+- It binds the round, the key, the ticket count, the exact amount and the destination, so it can't be replayed or redirected.
+
+**Destination**
+- Shielded only (u1… / zs1…). A transparent address is refused, because it would expose the refund on chain.
+
+**Publication**
+- The round record lists `withdrawn: [{tickets, amountZats, feeZats, txid}]`. That's enough to audit the pot arithmetic.
+- **The destination address is never published.** Only the operator's engine sees it.
+
+**Payout**
+- The pool sends `amount` with memo `SNARKPOT1 refund` on the next tick. A failed send stays queued and retries.
 
 ## 5. Transparency
 
@@ -130,6 +170,8 @@ winner = BigInt("0x" + seed) mod N
 | Winner's account ID | Public, in the round file and on Zilkroad provenance | Needed so anyone can verify delivery. It's a pseudonym, so use a fresh one |
 | Amount patterns | Observers of the UIVK see amounts, which are multiples of 0.1 | Fixed denominations keep amounts uninformative |
 | Claim-time IP | Operator's HTTP endpoint | No request logging. Documented as Tor-friendly |
+| Withdrawal address | Operator only | Shielded addresses only. Never published. The UI recommends a fresh address |
+| That a key withdrew | Public: its ticket lines appear under `withdrawn` | The key is a one-time pseudonym, so this reveals nothing about the person |
 
 Leaks are disqualifying under the rules, so the README will include this table and say plainly that custody is trusted (§1).
 

@@ -128,6 +128,9 @@ input {
 .result { border-top: 1px solid var(--line); padding: 14px 0 0; margin-top: 14px; }
 .result .won { color: var(--gold); font-weight: 700; }
 .claim { display: grid; gap: 8px; margin-top: 10px; }
+.claim .hint { color: var(--muted); margin: 0; }
+.claim .hint strong { color: var(--text); }
+.claim label { color: var(--muted); font-size: var(--step--1); }
 
 .past { list-style: none; margin: 0; padding: 0; }
 .past li { display: grid; grid-template-columns: 4.5em 1fr auto; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); align-items: baseline; }

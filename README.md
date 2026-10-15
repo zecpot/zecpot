@@ -4,6 +4,8 @@ A daily private draw for one zkSNARK. Buy 0.1 ZEC tickets with a shielded paymen
 
 Nobody, including the operator, learns who bought a ticket or who won.
 
+If a round closes before its pot covers the prize, its tickets roll into the next round automatically. Until that round closes, the owner can withdraw their ZEC instead, minus the network fee.
+
 ZECATHON entry, Wildcard track. The protocol, privacy analysis and build plan are in **[SPEC.md](SPEC.md)**.
 
 ## Try it (mock chain, no ZEC needed)
@@ -41,8 +43,8 @@ npm run verify -- 2  # re-check a published round file (var/data/rounds/2.json)
 | Piece | State |
 |---|---|
 | Core protocol + tests | ✅ done |
-| Engine: rounds, rollover, draw, purchase retry, refunds, claims, expiry → bonus | ✅ done on the mock chain |
-| Web: buy (QR / ZIP-321), ticket code, client-side check, claim, in-browser verify | ✅ done on the mock chain |
+| Engine: rounds, rollover, draw, purchase retry, refunds, claims, expiry → bonus, withdraw-or-roll | ✅ done on the mock chain |
+| Web: buy (QR / ZIP-321), ticket code, client-side check, withdraw, claim, in-browser verify | ✅ done on the mock chain |
 | `ZingoWallet` (pool wallet over zingo-cli) | ⏳ skeleton. Command names and parsing still to fill in (SPEC §8) |
 | `ExplorerChain` (block hash) | ⏳ skeleton |
 | `HttpZilkroad` | 🟡 written against observed endpoints. Order response and status strings still unconfirmed |

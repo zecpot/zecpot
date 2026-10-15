@@ -13,8 +13,12 @@ import {
   ticketsNeeded,
   targetZats,
   verifyClaim,
+  verifyWithdraw,
+  withdrawAmountZats,
+  withdrawFeeZats,
   winnerIndex,
   ACCOUNT_ID_RE,
+  SHIELDED_ADDR_RE,
   type Params,
   type RoundRecord,
   type Ticket,
@@ -42,8 +46,20 @@ export interface EngineState {
   bonusSnarkIds: number[];
   /** Order codes of lost purchases; an incoming payment whose memo contains one is a refund, not pot money. */
   refundCodes: string[];
+  /** Withdrawal payouts. `to` is private and never published. */
+  withdrawals: Withdrawal[];
   lastFloorZats: number | null;
   log: { at: string; msg: string }[];
+}
+
+export interface Withdrawal {
+  id: number;
+  round: number;
+  lines: string[];
+  to: string;
+  amountZats: number;
+  status: "queued" | "sent";
+  txid?: string;
 }
 
 export interface Deps {
@@ -73,6 +89,7 @@ export function initialState(opts: {
     rounds: [newRound(1, opts.startHeight, params, [], 0)],
     bonusSnarkIds: [],
     refundCodes: [],
+    withdrawals: [],
     lastFloorZats: null,
     log: [],
   };
@@ -88,7 +105,9 @@ function newRound(n: number, openHeight: number, params: Params, carried: Ticket
     closeHeight,
     seedHeight: closeHeight + params.seedDelay,
     potZats: carriedPot,
-    tickets: [],
+    tickets: carried.map(ticketLine),
+    carriedCount: carried.length,
+    withdrawn: [],
     carried,
     fresh: [],
     donationsZats: 0,
@@ -137,6 +156,19 @@ export class Engine {
       this.close(open);
     }
 
+    // Pay out queued withdrawals. A failure (e.g. change not yet spendable) retries next tick.
+    for (const w of this.state.withdrawals.filter((x) => x.status === "queued")) {
+      try {
+        w.txid = await this.deps.wallet.send(w.to, w.amountZats, "SNARKPOT1 refund");
+        w.status = "sent";
+        const rec = this.round(w.round)?.withdrawn.find((x) => x.tickets[0] === w.lines[0]);
+        if (rec) rec.txid = w.txid;
+        this.log(`withdrawal ${w.id}: sent ${w.amountZats} zats`);
+      } catch (e) {
+        this.log(`withdrawal ${w.id}: send failed, will retry: ${(e as Error).message}`);
+      }
+    }
+
     // 3–6. Drawn rounds move forward.
     for (const r of this.state.rounds) {
       // One round's failure (market down, session expired) must not block the others.
@@ -177,12 +209,43 @@ export class Engine {
       open.fresh.push(...ts);
     }
     this.state.scannedHeight = upTo;
-    open.tickets = roundTicketList(open.carried, open.fresh).map(ticketLine);
+    this.refreshList(open);
+  }
+
+  private refreshList(r: InternalRound) {
+    r.tickets = roundTicketList(r.carried, r.fresh).map(ticketLine);
+    r.carriedCount = r.carried.length;
+  }
+
+  /**
+   * Withdraw-or-roll (SPEC §4.7). Only tickets carried in from an unfilled
+   * round, only while the round they were carried into is still open. All of a
+   * key's carried tickets are withdrawn together. Called by the HTTP API.
+   */
+  submitWithdraw(round: number, pk: string, to: string, sig: string): { ok: boolean; error?: string; amountZats?: number } {
+    const open = this.openRound();
+    if (round !== open.round) return { ok: false, error: `withdrawals are open for round ${open.round} only` };
+    if (!SHIELDED_ADDR_RE.test(to)) return { ok: false, error: "use a shielded address starting with u1 or zs1" };
+    const mine = open.carried.filter((t) => t.pk === pk);
+    if (mine.length === 0) return { ok: false, error: "this code has no tickets from an unfilled round to withdraw" };
+    const n = mine.length;
+    const amount = withdrawAmountZats(n, this.p);
+    if (!verifyWithdraw(pk, round, n, amount, to, sig)) return { ok: false, error: "signature does not match this ticket code and amount" };
+
+    const lines = mine.map(ticketLine);
+    open.carried = open.carried.filter((t) => t.pk !== pk);
+    open.potZats -= n * this.p.ticketZats; // payout + network fee; any fee excess stays in the wallet as float
+    open.withdrawn.push({ tickets: lines, amountZats: amount, feeZats: withdrawFeeZats(n, this.p) });
+    this.refreshList(open);
+    this.state.withdrawals.push({ id: this.state.withdrawals.length + 1, round, lines, to, amountZats: amount, status: "queued" });
+    this.log(`round ${round}: ${n} carried ticket(s) withdrawn, ${amount} zats queued`);
+    return { ok: true, amountZats: amount };
   }
 
   private close(r: InternalRound) {
     const list = roundTicketList(r.carried, r.fresh);
     r.tickets = list.map(ticketLine);
+    r.carriedCount = r.carried.length;
     r.listHash = listHash(list);
     const floor = this.state.lastFloorZats ?? Infinity;
     r.floorZatsAtClose = Number.isFinite(floor) ? floor : undefined;

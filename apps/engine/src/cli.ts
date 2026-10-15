@@ -105,6 +105,12 @@ async function serveMock() {
         await step();
         return { status: out.ok ? 200 : 400, json: out };
       },
+      "/api/withdraw": async (b) => {
+        const { round, pk, to, sig } = b as { round: number; pk: string; to: string; sig: string };
+        const out = engine.submitWithdraw(Number(round), String(pk), String(to), String(sig));
+        await step();
+        return { status: out.ok ? 200 : 400, json: out };
+      },
       "/api/mock/pay": async (b) => {
         const { zats, memo } = b as { zats: number; memo: string };
         chain.pay(Number(zats), String(memo));

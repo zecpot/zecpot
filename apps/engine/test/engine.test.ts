@@ -106,3 +106,61 @@ test("unclaimed prize becomes a bonus in the next drawn round", async () => {
   await engine.tick();
   assert.deepEqual(market.transfers.map((t) => t.snarkId).sort(), [2950, 2951]);
 });
+
+import { signWithdraw, withdrawAmountZats } from "../../../packages/core/src/index.ts";
+const ADDR = "u1" + "q".repeat(110);
+
+test("withdraw: unfilled round tickets can be pulled out of the next round, minus fee", async () => {
+  const { chain, engine } = setup();
+  const a = buy(chain, 3);
+  const b = buy(chain, 1);
+  chain.mine(P.roundBlocks);
+  await engine.tick(); // round 1 rolls, round 2 open with 4 carried tickets
+  const r2 = engine.openRound();
+  assert.equal(r2.round, 2);
+  assert.equal(r2.carriedCount, 4);
+  const amount = withdrawAmountZats(3, P);
+  const res = engine.submitWithdraw(2, a.pk, ADDR, signWithdraw(a.code, 2, 3, amount, ADDR));
+  assert.deepEqual(res, { ok: true, amountZats: amount });
+  assert.equal(r2.carriedCount, 1);
+  assert.equal(r2.tickets.length, 1);
+  assert.equal(r2.potZats, 1 * P.ticketZats);
+  await engine.tick();
+  assert.deepEqual(chain.sent.map((s) => [s.to, s.zats]), [[ADDR, amount]]);
+  assert.equal(engine.state.withdrawals[0]!.status, "sent");
+  assert.ok(r2.withdrawn[0]!.txid);
+  // b did nothing → still in round 2 automatically
+  assert.ok(r2.tickets[0]!.endsWith(b.pk));
+  // public round record never contains the destination address
+  assert.ok(!JSON.stringify(engine.publicRound(r2)).includes(ADDR));
+});
+
+test("withdraw: refused for fresh tickets, twice, wrong round, wrong amount, transparent address", async () => {
+  const { chain, engine } = setup();
+  const a = buy(chain, 2);
+  chain.mine(P.roundBlocks);
+  await engine.tick();
+  const fresh = buy(chain, 1); // bought in round 2 itself, not carried
+  await engine.tick();
+  const amt1 = withdrawAmountZats(1, P);
+  assert.equal(engine.submitWithdraw(2, fresh.pk, ADDR, signWithdraw(fresh.code, 2, 1, amt1, ADDR)).ok, false);
+  const amt2 = withdrawAmountZats(2, P);
+  assert.equal(engine.submitWithdraw(1, a.pk, ADDR, signWithdraw(a.code, 1, 2, amt2, ADDR)).ok, false);
+  assert.equal(engine.submitWithdraw(2, a.pk, ADDR, signWithdraw(a.code, 2, 2, amt2 + 1, ADDR)).ok, false);
+  assert.equal(engine.submitWithdraw(2, a.pk, "t1notshielded", "x").ok, false);
+  assert.equal(engine.submitWithdraw(2, a.pk, ADDR, signWithdraw(a.code, 2, 2, amt2, ADDR)).ok, true);
+  assert.equal(engine.submitWithdraw(2, a.pk, ADDR, signWithdraw(a.code, 2, 2, amt2, ADDR)).ok, false);
+});
+
+test("withdraw: only from the round the tickets currently sit in", async () => {
+  const { chain, engine } = setup();
+  const a = buy(chain, 2);
+  chain.mine(P.roundBlocks);
+  await engine.tick(); // round 1 rolled
+  chain.mine(P.roundBlocks);
+  await engine.tick(); // round 2 rolled too → tickets now carried into round 3
+  const amt = withdrawAmountZats(2, P);
+  assert.equal(engine.submitWithdraw(2, a.pk, ADDR, signWithdraw(a.code, 2, 2, amt, ADDR)).ok, false);
+  // …but they are carried again into round 3, so they can still leave from there
+  assert.equal(engine.submitWithdraw(3, a.pk, ADDR, signWithdraw(a.code, 3, 2, amt, ADDR)).ok, true);
+});

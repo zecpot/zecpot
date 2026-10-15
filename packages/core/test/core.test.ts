@@ -103,8 +103,23 @@ test("verifyRound catches a tampered winner", () => {
     return { txid: txid!, outIndex: +o!, k: +kk!, pk: pk!, height: 0 };
   });
   const w = winnerIndex(1, HASH, parsed);
-  const base = { round: 1, status: "claimed" as const, params: DEFAULT_PARAMS, openHeight: 0, closeHeight: 1, seedHeight: 2, potZats: 0, tickets, listHash: listHash(parsed), seedBlockHash: HASH };
+  const base = { round: 1, status: "claimed" as const, params: DEFAULT_PARAMS, openHeight: 0, closeHeight: 1, seedHeight: 2, potZats: 0, tickets, carriedCount: 0, withdrawn: [], listHash: listHash(parsed), seedBlockHash: HASH };
   const sig = signClaim(k.code, 1, w, "ZR-7K4Q-M2XD");
   assert.ok(verifyRound({ ...base, winner: w, claim: { to: "ZR-7K4Q-M2XD", sig, transferredAt: "" } }).ok);
   assert.ok(!verifyRound({ ...base, winner: (w + 1) % 4 }).ok);
+});
+
+test("withdraw: fee, amount, signature binds round/amount/address", async () => {
+  const { signWithdraw, verifyWithdraw, withdrawAmountZats, withdrawFeeZats } = await import("../src/index.ts");
+  assert.equal(withdrawFeeZats(1), 10_000); // ZIP-317 minimum of 2 actions
+  assert.equal(withdrawFeeZats(3), 20_000);
+  assert.equal(withdrawAmountZats(3), 29_980_000);
+  const k = newTicketKey();
+  const to = "u1" + "q".repeat(110);
+  const sig = signWithdraw(k.code, 4, 3, 29_980_000, to);
+  assert.ok(verifyWithdraw(k.pk, 4, 3, 29_980_000, to, sig));
+  assert.ok(!verifyWithdraw(k.pk, 5, 3, 29_980_000, to, sig));
+  assert.ok(!verifyWithdraw(k.pk, 4, 3, 29_990_000, to, sig));
+  assert.ok(!verifyWithdraw(k.pk, 4, 3, 29_980_000, "u1" + "p".repeat(110), sig));
+  assert.throws(() => signWithdraw(k.code, 4, 3, 29_980_000, "t1abcdefghijkmnopqrstuvwxyz123456"));
 });
