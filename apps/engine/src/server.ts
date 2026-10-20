@@ -69,6 +69,15 @@ export function startServer(opts: { port: number; webDir: string; dataDir: strin
       if (req.method === "GET" && url.pathname.startsWith("/data/")) {
         return await serveFile(res, opts.dataDir, url.pathname.slice("/data/".length));
       }
+      // Operator and demo endpoints answer only on this machine. A tunnel or proxy (Cloudflare, nginx)
+      // also connects from localhost, so any forwarding header means the request came from outside.
+      if (url.pathname === "/api/operator" || url.pathname.startsWith("/api/mock/")) {
+        const h = req.headers;
+        const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress ?? "");
+        if (!local || h["cf-connecting-ip"] || h["x-forwarded-for"] || h["x-real-ip"] || h["forwarded"] || h["cf-ray"]) {
+          if (url.pathname === "/api/operator" || process.env.ZECPOT_PUBLIC_DEMO !== "1") return send(res, 404, TYPES[".txt"]!, "not found");
+        }
+      }
       if (req.method === "POST" && opts.post[url.pathname]) {
         const out = await opts.post[url.pathname]!(await readBody(req));
         return send(res, out.status, TYPES[".json"]!, JSON.stringify(out.json));
