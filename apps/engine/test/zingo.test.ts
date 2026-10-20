@@ -21,8 +21,26 @@ const note = (o: Partial<Record<string, unknown>>) => ({
   ...o,
 });
 
-test("extractJson skips leading text", () => {
+test("extractJson skips the status lines zingo-cli prints around its JSON", () => {
   assert.deepEqual(extractJson('Launching sync task...\n{\n  "height": 3500100\n}\n'), { height: 3500100 });
+  // verbatim shape of a real quicksend on the operator's Mac, 2026-10-20
+  const real = [
+    "Launching sync task...",
+    "Launching save task...",
+    "{",
+    '  "txids": [',
+    '    "5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e"',
+    "  ],",
+    '  "transmissions": [',
+    '    { "txid": "5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e", "over_mixnet": false, "destination": "zec.rocks", "rtt_ms": 539 }',
+    "  ]",
+    "}",
+    "Save task shutdown successfully.",
+    "Zingo CLI quit successfully.",
+  ].join("\n");
+  assert.deepEqual((extractJson(real) as { txids: string[] }).txids, ["5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e"]);
+  // braces inside strings (e.g. a memo) don't confuse it
+  assert.deepEqual(extractJson('x\n{"memo": "a } b { [c]", "n": 1}\ntrailing'), { memo: "a } b { [c]", n: 1 });
   assert.throws(() => extractJson("Error: no wallet"));
 });
 

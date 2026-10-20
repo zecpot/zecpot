@@ -40,11 +40,33 @@ export type Exec = (bin: string, args: string[]) => Promise<{ stdout: string; st
 
 const defaultExec: Exec = (bin, args) => run(bin, args, { maxBuffer: 64 * 1024 * 1024, timeout: 15 * 60_000 });
 
-/** Extracts the JSON document a one-shot command printed (stdout may carry a line of text first). */
+/**
+ * Extracts the JSON document a one-shot command printed. zingo-cli prints
+ * status lines around it ("Launching sync task...", "Zingo CLI quit
+ * successfully."), so this takes the first balanced {...} or [...] that
+ * starts a line, honouring strings and escapes.
+ */
 export function extractJson(stdout: string): unknown {
-  const i = stdout.search(/[{[]/);
-  if (i < 0) throw new Error(`no JSON in zingo-cli output: ${stdout.slice(0, 200)}`);
-  return JSON.parse(stdout.slice(i));
+  const m = /^[ \t]*[{[]/m.exec(stdout);
+  if (!m) throw new Error(`no JSON in zingo-cli output: ${stdout.slice(0, 200)}`);
+  const start = m.index + m[0].length - 1;
+  let depth = 0;
+  let inStr = false;
+  for (let i = start; i < stdout.length; i++) {
+    const c = stdout[i];
+    if (inStr) {
+      if (c === "\\") i++;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") {
+      depth--;
+      if (depth === 0) return JSON.parse(stdout.slice(start, i + 1));
+    }
+  }
+  throw new Error(`unterminated JSON in zingo-cli output: ${stdout.slice(start, start + 200)}`);
 }
 
 export class ZingoCli {
