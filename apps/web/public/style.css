@@ -64,6 +64,8 @@ input {
 /* ---------- top ---------- */
 .top { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-top: 22px; flex-wrap: wrap; }
 .mark { color: var(--text); text-decoration: none; font-weight: 800; font-size: var(--step-1); letter-spacing: -0.03em; }
+.mark { display: inline-flex; align-items: center; gap: 8px; }
+.mark .logo { width: 1.7em; height: 1.7em; flex: none; margin-top: -0.15em; }
 .top-links { display: flex; gap: 22px; }
 .top-links a { color: var(--muted); text-decoration: none; font-size: var(--step--1); font-weight: 550; }
 .top-links a:hover { color: var(--text); }
