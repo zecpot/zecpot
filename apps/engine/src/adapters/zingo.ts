@@ -103,10 +103,17 @@ interface NoteJson {
   output_index: number;
   scope: string; // "external" | "internal"
 }
+/** zingo-cli wraps each pool's list: {"note_summaries": [...]} (NoteSummaries → JsonValue). */
+type NoteList = { note_summaries?: NoteJson[] } | NoteJson[];
 export interface NotesJson {
-  ironwood_notes?: NoteJson[];
-  orchard_notes?: NoteJson[];
-  sapling_notes?: NoteJson[];
+  ironwood_notes?: NoteList;
+  orchard_notes?: NoteList;
+  sapling_notes?: NoteList;
+}
+
+function listOf(l: NoteList | undefined): NoteJson[] {
+  if (!l) return [];
+  return Array.isArray(l) ? l : (l.note_summaries ?? []);
 }
 
 /** Orchard notes (pre-NU6.3 only) get an offset so they can't collide with an Ironwood output index in the same tx. */
@@ -119,8 +126,8 @@ export const ORCHARD_INDEX_OFFSET = 10_000;
  */
 export function paymentsFromNotes(n: NotesJson): Payment[] {
   const out: Payment[] = [];
-  const take = (notes: NoteJson[] | undefined, offset: number) => {
-    for (const x of notes ?? []) {
+  const take = (notes: NoteList | undefined, offset: number) => {
+    for (const x of listOf(notes)) {
       if (x.scope !== "external") continue;
       const m = /^confirmed at block height (\d+)$/.exec(x.status);
       if (!m) continue; // mempool / transmitted: wait for confirmation

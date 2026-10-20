@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as grpc from "@grpc/grpc-js";
 import * as loader from "@grpc/proto-loader";
-import { newTicketKey, ticketMemo } from "../../../packages/core/src/index.ts";
+import { newTicketKey, ticketMemo, ticketsFromPayment } from "../../../packages/core/src/index.ts";
 import { displayHash, extractJson, LightwalletdChain, ORCHARD_INDEX_OFFSET, paymentsFromNotes, ZingoCli, ZingoPool, type Exec } from "../src/adapters/zingo.ts";
 
 // JSON shapes copied from zingolib's NoteSummary → JsonValue (zingolib/src/wallet/summary/data.rs).
@@ -66,6 +66,43 @@ test("paymentsFromNotes keeps confirmed external notes, skips change and mempool
   );
 });
 
+test("paymentsFromNotes reads the real `notes all` output from the operator's Mac (2026-10-20)", () => {
+  const real = extractJson(`WARNING: this build carries \`nakednet-test-mode\`, so it went online with NO mixnet.
+Launching save task...
+{
+  "ironwood_notes": {
+    "note_summaries": [
+      {
+        "value": 10000000,
+        "status": "confirmed at block height 3524121",
+        "spend_status": "unspent",
+        "memo": "SNARKPOT1 8JvxZqH99sQ9AZ5nTHqTd0AKSL-KpLMCQmTddoJuXuM",
+        "time": 1792479733,
+        "txid": "0ddbfeb568e052454b2fa7dc45bb638361543bbb3f50b7310c1d97505edf25d8",
+        "output_index": 0,
+        "account_id": 0,
+        "scope": "external"
+      }
+    ]
+  },
+  "orchard_notes": { "note_summaries": [] },
+  "sapling_notes": { "note_summaries": [] }
+}
+Save task shutdown successfully.
+Zingo CLI quit successfully.`) as Parameters<typeof paymentsFromNotes>[0];
+  const ps = paymentsFromNotes(real);
+  assert.equal(ps.length, 1);
+  assert.deepEqual(ps[0], {
+    txid: "0ddbfeb568e052454b2fa7dc45bb638361543bbb3f50b7310c1d97505edf25d8",
+    outIndex: 0,
+    height: 3524121,
+    zats: 10_000_000,
+    memo: "SNARKPOT1 8JvxZqH99sQ9AZ5nTHqTd0AKSL-KpLMCQmTddoJuXuM",
+  });
+  // and it becomes exactly one ticket
+  assert.equal(ticketsFromPayment(ps[0]!).length, 1);
+});
+
 /** A fake zingo-cli: records argv, answers per wallet+command. */
 function fakeCli(answers: Record<string, (args: string[]) => unknown>) {
   const calls: string[][] = [];
@@ -84,7 +121,7 @@ test("ZingoPool: syncs each wallet once per tick, sweeps inbox → ops, pays fro
   const OPS = "u1" + "o".repeat(110);
   const { exec, calls } = fakeCli({
     "inbox:height": () => ({ height: 3500100 }),
-    "inbox:notes": () => ({ ironwood_notes: [note({ memo: ticketMemo(newTicketKey().pk) })], orchard_notes: [], sapling_notes: [] }),
+    "inbox:notes": () => ({ ironwood_notes: { note_summaries: [note({ memo: ticketMemo(newTicketKey().pk) })] }, orchard_notes: { note_summaries: [] }, sapling_notes: { note_summaries: [] } }),
     "inbox:max_send_value": () => ({ max_send_value: 59_980_000 }),
     "inbox:quicksend": () => ({ txids: ["11".repeat(32)], transmissions: [] }),
     "ops:spendable_balance": () => ({ spendable_balance: 59_980_000 }),
