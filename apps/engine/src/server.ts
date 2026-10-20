@@ -15,6 +15,7 @@ const TYPES: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".png": "image/png",
   ".woff2": "font/woff2",
   ".txt": "text/plain; charset=utf-8",
 };
@@ -38,7 +39,10 @@ export function startServer(opts: { port: number; webDir: string; dataDir: strin
     const path = normalize(join(root, rel));
     if (!path.startsWith(resolve(root))) return send(res, 403, TYPES[".txt"]!, "forbidden");
     try {
-      send(res, 200, TYPES[extname(path)] ?? "application/octet-stream", await readFile(path));
+      let body: string | Buffer = await readFile(path);
+      // Link previews need absolute URLs: SITE_URL=https://your.domain (no trailing slash)
+      if (rel === "index.html") body = body.toString("utf8").replaceAll("%SITE_URL%", (process.env.SITE_URL ?? "").replace(/\/+$/, ""));
+      send(res, 200, TYPES[extname(path)] ?? "application/octet-stream", body);
     } catch {
       send(res, 404, TYPES[".txt"]!, "not found");
     }

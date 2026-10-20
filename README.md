@@ -91,6 +91,7 @@ The live engine runs three zingo-cli wallets. SPEC §5 explains why it needs thr
    npm run serve
    ```
    This serves the site and the claim API, and runs a tick every 60 s. For a public site, put it behind a host with access logs off.
+   On a public domain, also set `SITE_URL=https://your.domain` in `.env`, so link previews (the `og.png` card) work.
 5. **Operator to-dos.** If Zilkroad is down or the session has expired, sweeps and bonus deliveries become tasks instead of failing:
    ```sh
    npm run op -- tasks
