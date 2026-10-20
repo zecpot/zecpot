@@ -23,6 +23,8 @@ export class HttpZilkroad implements ZilkroadAdapter {
   constructor(
     private cookie: string,
     private base = "https://zilkroad.com/api",
+    /** Cloudflare ties cf_clearance to the browser's User-Agent; send the same one. */
+    private userAgent = "",
   ) {}
 
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -32,6 +34,7 @@ export class HttpZilkroad implements ZilkroadAdapter {
         accept: "application/json",
         ...(body ? { "content-type": "application/json" } : {}),
         ...(this.cookie ? { cookie: this.cookie } : {}),
+        ...(this.userAgent ? { "user-agent": this.userAgent } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
     });

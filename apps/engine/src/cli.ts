@@ -152,7 +152,7 @@ async function liveEngine() {
     new ZingoCli({ bin, dataDir: env("OPS_DATA_DIR"), server }),
     env("OPS_ADDRESS"),
   );
-  const market = new HttpZilkroad(env("ZILKROAD_COOKIE"));
+  const market = new HttpZilkroad(env("ZILKROAD_COOKIE"), undefined, process.env.ZILKROAD_USER_AGENT ?? "");
   let state = await loadState(STATE);
   if (!state) {
     await wallet.beginTick();

@@ -72,7 +72,7 @@ It reads draw block hashes from the same lightwalletd server over gRPC. SPEC §5
    ```
    Note the zingolib commit you built from. The engine relies on its JSON output (SPEC §8). `nym-proxy` must sit next to `zingo-cli`: zingo-cli only goes online through the Nym mixnet, and without the proxy it fails with "No such file or directory".
 2. **Create the wallets:** `./tools/setup-pool.sh`. It prints both recovery phrases, so write them down offline. It also prints the `.env` values.
-3. **Zilkroad:** sign up with the **ops** address. Sign in by hand in a browser and put the session cookie in `ZILKROAD_COOKIE`. The engine does not and will not solve the Turnstile CAPTCHA.
+3. **Zilkroad:** sign up with the **ops** address. Sign in by hand in a browser and put the session cookie in `ZILKROAD_COOKIE` (format `cf_clearance=…; zr_session=…`, from DevTools → Application → Cookies). If Cloudflare challenges the engine, also set `ZILKROAD_USER_AGENT` to that browser's exact User-Agent, since `cf_clearance` is tied to it. The engine does not and will not solve the Turnstile CAPTCHA.
 4. **Check byte order once:** `npm run blockhash -- <recent height>` must match the hash an explorer shows for that block.
 5. **Run:** `set -a; source .env; set +a; npm run serve`. This runs the site, the claim and withdraw API, and a tick every 60 s (`TICK_SECONDS`). For a public site, put it behind a host with access logs off.
 6. **First live test:** pay 0.1 ZEC with a ticket memo from Zodl. Within a few minutes it should show up in the round and in `var/data/state.json`.
