@@ -65,10 +65,12 @@ It reads draw block hashes from the same lightwalletd server over gRPC. SPEC §5
    ```sh
    brew install protobuf jq            # rustup too, if you don't have Rust
    git clone https://github.com/zingolabs/zingolib && cd zingolib
-   cargo build --release --package zingo-cli   # rust-toolchain.toml pins Rust 1.99; rustup fetches it
-   export ZINGO_BIN=$PWD/target/release/zingo-cli
+   cargo install cargo-make                    # provides `makers`
+   makers run-cli --build-only                 # builds zingo-cli AND nym-proxy (needed to go online)
+   mkdir -p ~/bin && cp target/release/zingo-cli target/release/nym-proxy ~/bin/
+   export ZINGO_BIN=$HOME/bin/zingo-cli
    ```
-   Note the zingolib commit you built from. The engine relies on its JSON output (SPEC §8).
+   Note the zingolib commit you built from. The engine relies on its JSON output (SPEC §8). `nym-proxy` must sit next to `zingo-cli`: zingo-cli only goes online through the Nym mixnet, and without the proxy it fails with "No such file or directory".
 2. **Create the wallets:** `./tools/setup-pool.sh`. It prints both recovery phrases, so write them down offline. It also prints the `.env` values.
 3. **Zilkroad:** sign up with the **ops** address. Sign in by hand in a browser and put the session cookie in `ZILKROAD_COOKIE`. The engine does not and will not solve the Turnstile CAPTCHA.
 4. **Check byte order once:** `npm run blockhash -- <recent height>` must match the hash an explorer shows for that block.
