@@ -24,7 +24,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Payment } from "../../../../packages/core/src/index.ts";
-import type { ChainAdapter, WalletAdapter } from "./types.ts";
+import type { ChainAdapter, TreasuryAdapter, WalletAdapter } from "./types.ts";
 
 const run = promisify(execFile);
 
@@ -234,5 +234,34 @@ export class LightwalletdChain implements ChainAdapter {
     const block = await new Promise<{ hash: Buffer; height: string }>((ok, fail) => c.GetBlock({ height }, (e, r) => (e ? fail(e) : ok(r))));
     if (Number(block.height) !== height || block.hash.length !== 32) throw new Error(`lightwalletd returned a bad block for ${height}`);
     return displayHash(block.hash);
+  }
+}
+
+/* ---------------- the treasury wallet ---------------- */
+
+/**
+ * The third wallet: receives the 5% fees from OPS and pays for floor sweeps.
+ * Its UFVK is published, so anyone can check fees in and sweeps out.
+ */
+export class ZingoTreasury implements TreasuryAdapter {
+  private synced = false;
+  constructor(private cli: ZingoCli) {}
+
+  async beginTick() {
+    this.synced = false;
+  }
+  private async run<T>(command: string[]): Promise<T> {
+    const r = await this.cli.json<T>(command, { sync: !this.synced });
+    this.synced = true;
+    return r;
+  }
+  async balance(): Promise<{ spendableZats: number }> {
+    const r = await this.run<{ spendable_balance: number }>(["spendable_balance"]);
+    return { spendableZats: r.spendable_balance };
+  }
+  async send(to: string, zats: number, memo: string): Promise<string> {
+    const r = await this.run<{ txids: string[] }>(["quicksend", to, String(zats), memo]);
+    if (!r.txids?.[0]) throw new Error("zingo-cli quicksend returned no txid");
+    return r.txids[0];
   }
 }

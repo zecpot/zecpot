@@ -1,29 +1,74 @@
 /**
- * In-memory chain + wallet + market for tests and `npm run simulate`.
+ * In-memory chain, wallets and market for tests and the demo.
  * Deterministic: block hashes are sha256("mock-block-<height>").
  */
 import { sha256Hex, type Payment } from "../../../../packages/core/src/index.ts";
-import type { ChainAdapter, Listing, Order, OrderState, WalletAdapter, ZilkroadAdapter } from "./types.ts";
+import type { ChainAdapter, Listing, Order, OrderState, TreasuryAdapter, WalletAdapter, ZilkroadAdapter } from "./types.ts";
 
+export interface Sent {
+  to: string;
+  zats: number;
+  memo: string;
+  txid: string;
+}
+
+const MOCK_FEE = 10_000;
+
+/** A plain wallet: balance plus a list of what it sent. Used for the treasury. */
+export class MockWallet implements TreasuryAdapter {
+  balanceZats = 0;
+  sent: Sent[] = [];
+  constructor(
+    private chain: MockChain,
+    public address: string,
+  ) {
+    chain.wallets.set(address, this);
+  }
+  async balance() {
+    return { spendableZats: this.balanceZats };
+  }
+  async send(to: string, zats: number, memo: string) {
+    if (zats + MOCK_FEE > this.balanceZats) throw new Error("insufficient funds");
+    this.balanceZats -= zats + MOCK_FEE;
+    const txid = this.chain.newTxid("treasury");
+    this.sent.push({ to, zats, memo, txid });
+    this.chain.deliver(to, zats);
+    this.chain.mine(1);
+    return txid;
+  }
+}
+
+/** The chain plus the pot's own wallet (inbox and ops folded together). */
 export class MockChain implements WalletAdapter, ChainAdapter {
   tip: number;
   private received: Payment[] = [];
   private balanceZats = 0;
-  sent: { to: string; zats: number; memo: string; txid: string }[] = [];
+  sent: Sent[] = [];
+  wallets = new Map<string, MockWallet>();
   private n = 0;
 
   constructor(startHeight = 3_100_000) {
     this.tip = startHeight;
   }
 
+  newTxid(tag: string) {
+    return sha256Hex(`mock-${tag}-${this.n++}`);
+  }
+
   mine(blocks = 1) {
     this.tip += blocks;
   }
 
-  /** Simulate someone paying the pool. Mined in the next block. */
+  /** Credit another mock wallet if the destination is one. */
+  deliver(to: string, zats: number) {
+    const w = this.wallets.get(to);
+    if (w) w.balanceZats += zats;
+  }
+
+  /** Simulate someone paying the pot. Mined in the next block. */
   pay(zats: number, memo: string | null): Payment {
     this.mine(1);
-    const p: Payment = { txid: sha256Hex(`mock-tx-${this.n++}`), outIndex: 0, height: this.tip, zats, memo };
+    const p: Payment = { txid: this.newTxid("tx"), outIndex: 0, height: this.tip, zats, memo };
     this.received.push(p);
     this.balanceZats += zats;
     return p;
@@ -36,10 +81,11 @@ export class MockChain implements WalletAdapter, ChainAdapter {
     return this.received.filter((p) => p.height > sinceHeight);
   }
   async send(to: string, zats: number, memo: string) {
-    if (zats + 10_000 > this.balanceZats) throw new Error("insufficient funds");
-    this.balanceZats -= zats + 10_000; // flat mock fee
-    const txid = sha256Hex(`mock-send-${this.n++}`);
+    if (zats + MOCK_FEE > this.balanceZats) throw new Error("insufficient funds");
+    this.balanceZats -= zats + MOCK_FEE;
+    const txid = this.newTxid("send");
     this.sent.push({ to, zats, memo, txid });
+    this.deliver(to, zats);
     this.mine(1);
     return txid;
   }
@@ -53,26 +99,33 @@ export class MockChain implements WalletAdapter, ChainAdapter {
 }
 
 export class MockZilkroad implements ZilkroadAdapter {
-  private book: Listing[];
+  book: Listing[];
   private orders = new Map<string, { order: Order; listing: Listing }>();
   held = new Set<number>();
   transfers: { snarkId: number; to: string }[] = [];
-  /** Set to make the next order lose the race (for tests). */
+  /** Test switches. */
   loseNext = false;
-  private wallet: MockChain;
+  failCalls = false;
 
-  constructor(wallet: MockChain, prices = [0.548, 0.55, 0.5539, 0.565, 0.6]) {
-    this.wallet = wallet;
+  constructor(
+    private payers: { sent: Sent[] }[],
+    prices = [0.384, 0.39, 0.4, 0.42, 0.45],
+  ) {
     this.book = prices.map((p, i) => ({ snarkId: 2950 + i, listingId: 50_000 + i, priceZats: Math.round(p * 1e8) }));
   }
 
+  private guard() {
+    if (this.failCalls) throw new Error("zilkroad 403: forbidden");
+  }
   async floorZats() {
     return this.book[0]?.priceZats ?? Infinity;
   }
   async listings(limit: number) {
+    this.guard();
     return this.book.slice(0, limit);
   }
   async createOrder(listingId: number, _buyer: string) {
+    this.guard();
     const listing = this.book.find((l) => l.listingId === listingId);
     if (!listing) throw new Error("this zkSNARK is not for sale");
     const id = `ord-${listingId}`;
@@ -92,25 +145,22 @@ export class MockZilkroad implements ZilkroadAdapter {
     if (this.loseNext) {
       this.loseNext = false;
       this.book = this.book.filter((l) => l !== o.listing);
-      // Assumed Zilkroad behaviour (to confirm): a losing payment is refunded
-      // to the payer with the order code in the memo.
-      const paid = this.wallet.sent.find((s) => s.memo === o.order.code);
-      if (paid) this.wallet.pay(paid.zats, `refund ${o.order.code}`);
       this.orders.delete(orderId);
       return "lost";
     }
-    const paid = this.wallet.sent.some((s) => s.memo === o.order.code && s.zats >= o.order.remainingZats);
+    const paid = this.payers.some((w) => w.sent.some((s) => s.memo === o.order.code && s.zats >= o.order.remainingZats));
     if (!paid) return "awaiting";
     this.book = this.book.filter((l) => l !== o.listing);
     this.held.add(o.listing.snarkId);
     return "paid";
   }
   async transfer(snarkId: number, to: string) {
+    this.guard();
     if (!this.held.has(snarkId)) throw new Error("you do not hold this zkSNARK");
     this.held.delete(snarkId);
     this.transfers.push({ snarkId, to });
   }
   async sessionOk() {
-    return true;
+    return !this.failCalls;
   }
 }

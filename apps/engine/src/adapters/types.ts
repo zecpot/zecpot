@@ -1,6 +1,6 @@
 import type { Payment } from "../../../../packages/core/src/index.ts";
 
-/** The pool wallet. Real impl: zingo-cli. Test impl: MockChain. */
+/** The pot's wallets (inbox receives, ops pays). Real impl: ZingoPool. Test impl: MockChain. */
 export interface WalletAdapter {
   /** Called once at the start of every engine tick (e.g. to sync once, then reuse). */
   beginTick?(): Promise<void>;
@@ -9,6 +9,13 @@ export interface WalletAdapter {
   incoming(sinceHeight: number): Promise<Payment[]>;
   send(to: string, zats: number, memo: string): Promise<string>;
   balance(): Promise<{ spendableZats: number }>;
+}
+
+/** The treasury wallet: receives the 5% fees, pays for floor sweeps. Its viewing key is published. */
+export interface TreasuryAdapter {
+  beginTick?(): Promise<void>;
+  balance(): Promise<{ spendableZats: number }>;
+  send(to: string, zats: number, memo: string): Promise<string>;
 }
 
 /** Block hash lookup for the draw seed (explorer display hex, lowercase). */

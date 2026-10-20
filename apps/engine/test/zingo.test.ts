@@ -57,11 +57,11 @@ test("paymentsFromNotes keeps confirmed external notes, skips change and mempool
     sapling_notes: [note({ txid: "ff".repeat(32) })], // pool UA has no Sapling receiver: ignored
   });
   assert.deepEqual(
-    ps.map((p) => [p.txid.slice(0, 2), p.outIndex, p.height, p.zats, p.memo?.slice(0, 9) ?? null]),
+    ps.map((p) => [p.txid.slice(0, 2), p.outIndex, p.height, p.zats, p.memo?.split(" ")[0] ?? null]),
     [
       ["ee", ORCHARD_INDEX_OFFSET + 2, 3400000, 10_000_000, null],
       ["dd", 0, 3499990, 10_000_000, "hello"],
-      ["aa", 1, 3500001, 30_000_000, "SNARKPOT1"],
+      ["aa", 1, 3500001, 30_000_000, "ZECPOT1"],
     ],
   );
 });
@@ -99,8 +99,8 @@ Zingo CLI quit successfully.`) as Parameters<typeof paymentsFromNotes>[0];
     zats: 10_000_000,
     memo: "SNARKPOT1 8JvxZqH99sQ9AZ5nTHqTd0AKSL-KpLMCQmTddoJuXuM",
   });
-  // and it becomes exactly one ticket
-  assert.equal(ticketsFromPayment(ps[0]!).length, 1);
+  // the 0.1 ZEC bought before the rename counts as 10 zecPOT tickets
+  assert.equal(ticketsFromPayment(ps[0]!).length, 10);
 });
 
 /** A fake zingo-cli: records argv, answers per wallet+command. */

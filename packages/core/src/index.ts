@@ -1,38 +1,53 @@
 /**
- * SNARKPOT core: pure, deterministic protocol code shared by the engine,
- * the web app and the verifier. See SPEC.md §4.
- * No I/O here — everything is a function of its inputs.
+ * zecPOT core: pure, deterministic protocol code shared by the engine, the
+ * web app and the verifier. See SPEC.md §4. No I/O here.
+ *
+ * zecPOT: 0.01 ZEC tickets, one draw a day, the winning ticket takes the pot
+ * minus a 5% fee; the fee goes to a public treasury that sweeps floor
+ * zkSNARKs, and those zkSNARKs are given away in a weekly bonus draw.
  */
 import { ed25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
 
-export const PROTOCOL = "SNARKPOT1";
+export const PROTOCOL = "ZECPOT1";
+/** Memos from before the rename are still accepted as tickets. */
+export const LEGACY_MEMO_TAGS = ["SNARKPOT1"];
 export const ZATS_PER_ZEC = 100_000_000;
 
 export interface Params {
+  /** Price of one ticket. */
   ticketZats: number;
+  /** Blocks per round: 1152 ≈ 24 h at 75 s. */
   roundBlocks: number;
   seedDelay: number;
   reorgSafety: number;
-  bufferBps: number;
-  feeReserveZats: number;
-  houseFeeBps: number;
+  /** Share of each drawn pot that goes to the treasury, in basis points. */
+  feeBps: number;
+  /** A round with fewer tickets rolls into the next one. */
+  minTickets: number;
   claimWindowBlocks: number;
-  /** ZIP-317 marginal fee; withdrawals pay feePerAction × max(2, notes + 1). */
+  /** ZIP-317 marginal fee per logical action. */
   feePerActionZats: number;
+  /** Treasury sweeps when it holds floor × (1 + sweepBufferBps) + sweepReserveZats. */
+  sweepBufferBps: number;
+  sweepReserveZats: number;
+  /** A bonus zkSNARK draw runs on every round number divisible by this, if the treasury holds one. */
+  bonusEveryRounds: number;
 }
 
 export const DEFAULT_PARAMS: Params = {
-  ticketZats: 10_000_000,
+  ticketZats: 1_000_000, // 0.01 ZEC
   roundBlocks: 1152,
   seedDelay: 10,
   reorgSafety: 10,
-  bufferBps: 500,
-  feeReserveZats: 200_000,
-  houseFeeBps: 0,
-  claimWindowBlocks: 16_128,
+  feeBps: 500, // 5%
+  minTickets: 1,
+  claimWindowBlocks: 16_128, // ≈ 14 days
   feePerActionZats: 5_000,
+  sweepBufferBps: 500,
+  sweepReserveZats: 200_000,
+  bonusEveryRounds: 7,
 };
 
 /* ---------------- encoding helpers ---------------- */
@@ -95,17 +110,23 @@ export function keyFromCode(code: string): TicketKey {
   return newTicketKey(sk);
 }
 
+function secretOf(code: string): Uint8Array {
+  return fromB64url(code.trim().slice(CODE_PREFIX.length));
+}
+
 /* ---------------- memo ---------------- */
 
 export function ticketMemo(pk: string): string {
   return `${PROTOCOL} ${pk}`;
 }
 
+const MEMO_RE = new RegExp(`^(?:${[PROTOCOL, ...LEGACY_MEMO_TAGS].join("|")}) ([A-Za-z0-9_-]{43})$`);
+
 /** Returns the public key if the memo is a valid ticket memo, else null. */
 export function parseTicketMemo(memo: string | null | undefined): string | null {
   if (!memo) return null;
   const m = memo.replace(/\u0000+$/g, "").trim();
-  const match = /^SNARKPOT1 ([A-Za-z0-9_-]{43})$/.exec(m);
+  const match = MEMO_RE.exec(m);
   if (!match) return null;
   try {
     if (fromB64url(match[1]!).length !== 32) return null;
@@ -142,6 +163,11 @@ export function ticketLine(t: Ticket): string {
   return `${t.txid}:${t.outIndex}:${t.k}:${t.pk}`;
 }
 
+export function parseLine(line: string): Ticket {
+  const [txid, outIndex, k, pk] = line.split(":");
+  return { txid: txid!, outIndex: Number(outIndex), k: Number(k), pk: pk!, height: 0 };
+}
+
 export function ticketsFromPayment(p: Payment, params: Params = DEFAULT_PARAMS): Ticket[] {
   const pk = parseTicketMemo(p.memo);
   if (!pk) return [];
@@ -169,21 +195,39 @@ export function listHash(tickets: Ticket[]): string {
   return sha256Hex(tickets.map(ticketLine).join("\n"));
 }
 
-/* ---------------- pot / target ---------------- */
+/* ---------------- pot split (SPEC §4.4) ---------------- */
 
-export function targetZats(floorZats: number, params: Params = DEFAULT_PARAMS): number {
-  return Math.ceil((floorZats * (10_000 + params.bufferBps)) / 10_000) + params.feeReserveZats;
+export interface PotSplit {
+  /** New money this round: ticket payments + donations. The fee applies to this only. */
+  feeBaseZats: number;
+  /** Money carried in (rolled pots, unclaimed prizes). Already fee'd or fee-free. */
+  carriedZats: number;
+  feeZats: number;
+  /** Network-fee allowance: one ZIP-317 action per payment note (sweep), plus the payout and fee transfer. */
+  networkZats: number;
+  prizeZats: number;
 }
 
-export function ticketsNeeded(potZats: number, floorZats: number, params: Params = DEFAULT_PARAMS): number {
-  const gap = targetZats(floorZats, params) - potZats;
-  return gap <= 0 ? 0 : Math.ceil(gap / params.ticketZats);
+export function potSplit(feeBaseZats: number, carriedZats: number, paymentNotes: number, params: Params = DEFAULT_PARAMS): PotSplit {
+  const feeZats = Math.floor((feeBaseZats * params.feeBps) / 10_000);
+  const networkZats = (paymentNotes + 5) * params.feePerActionZats;
+  const prizeZats = Math.max(0, feeBaseZats + carriedZats - feeZats - networkZats);
+  return { feeBaseZats, carriedZats, feeZats, networkZats, prizeZats };
 }
 
-/* ---------------- draw ---------------- */
+/** Balance the treasury needs before it buys the floor zkSNARK. */
+export function sweepTargetZats(floorZats: number, params: Params = DEFAULT_PARAMS): number {
+  return Math.ceil((floorZats * (10_000 + params.sweepBufferBps)) / 10_000) + params.sweepReserveZats;
+}
+
+/* ---------------- draws ---------------- */
+
+function requireHash(blockHashHex: string) {
+  if (!/^[0-9a-f]{64}$/.test(blockHashHex)) throw new Error("block hash must be 64 lowercase hex chars");
+}
 
 export function drawSeed(round: number, blockHashHex: string, lh: string): string {
-  if (!/^[0-9a-f]{64}$/.test(blockHashHex)) throw new Error("block hash must be 64 lowercase hex chars");
+  requireHash(blockHashHex);
   return sha256Hex(`${PROTOCOL}|draw|${round}|${blockHashHex}|${lh}`);
 }
 
@@ -193,39 +237,64 @@ export function winnerIndex(round: number, blockHashHex: string, tickets: Ticket
   return Number(BigInt("0x" + seed) % BigInt(tickets.length));
 }
 
-/* ---------------- claim ---------------- */
+/** The weekly bonus uses a separate domain tag so it never mirrors the daily draw. */
+export function bonusWinnerIndex(round: number, blockHashHex: string, tickets: Ticket[]): number {
+  if (tickets.length === 0) throw new Error("no tickets");
+  requireHash(blockHashHex);
+  const seed = sha256Hex(`${PROTOCOL}|bonus|${round}|${blockHashHex}|${listHash(tickets)}`);
+  return Number(BigInt("0x" + seed) % BigInt(tickets.length));
+}
 
+/* ---------------- claims (SPEC §3.2) ---------------- */
+
+/** Shielded only: a transparent destination would put the payout on the public chain. */
+export const SHIELDED_ADDR_RE = /^(u1[02-9ac-hj-np-z]{100,}|zs1[02-9ac-hj-np-z]{60,})$/;
 export const ACCOUNT_ID_RE = /^ZR-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
 
-export function claimMessage(round: number, ticket: number, to: string): string {
-  return `${PROTOCOL}|claim|round=${round}|ticket=${ticket}|to=${to}`;
+/**
+ * The destination is committed by hash, so the published claim can be
+ * verified without publishing the winner's address.
+ */
+export function destHash(to: string): string {
+  return sha256Hex(`${PROTOCOL}|dest|${to}`);
 }
 
-export function signClaim(code: string, round: number, ticket: number, to: string): string {
-  if (!ACCOUNT_ID_RE.test(to)) throw new Error("account ID looks like ZR-7K4Q-M2XD");
-  const sk = fromB64url(code.trim().slice(CODE_PREFIX.length));
-  return b64url(ed25519.sign(utf8ToBytes(claimMessage(round, ticket, to)), sk));
+export function claimMessage(round: number, ticket: number, toHash: string, amountZats: number): string {
+  return `${PROTOCOL}|claim|round=${round}|ticket=${ticket}|to=${toHash}|amount=${amountZats}`;
 }
 
-export function verifyClaim(pk: string, round: number, ticket: number, to: string, sig: string): boolean {
-  if (!ACCOUNT_ID_RE.test(to)) return false;
+export function signClaim(code: string, round: number, ticket: number, to: string, amountZats: number): string {
+  if (!SHIELDED_ADDR_RE.test(to)) throw new Error("use a shielded address starting with u1 or zs1");
+  return b64url(ed25519.sign(utf8ToBytes(claimMessage(round, ticket, destHash(to), amountZats)), secretOf(code)));
+}
+
+export function verifyClaim(pk: string, round: number, ticket: number, toHash: string, amountZats: number, sig: string): boolean {
   try {
-    return ed25519.verify(fromB64url(sig), utf8ToBytes(claimMessage(round, ticket, to)), fromB64url(pk));
+    return ed25519.verify(fromB64url(sig), utf8ToBytes(claimMessage(round, ticket, toHash, amountZats)), fromB64url(pk));
   } catch {
     return false;
   }
 }
 
-/* ---------------- withdraw (unfilled rounds only, SPEC §4.7) ---------------- */
+export function bonusClaimMessage(round: number, ticket: number, accountHash: string, snarkId: number): string {
+  return `${PROTOCOL}|bonus|round=${round}|ticket=${ticket}|to=${accountHash}|snark=${snarkId}`;
+}
 
-/** Shielded only: a transparent destination would put the refund on the public chain. */
-export const SHIELDED_ADDR_RE = /^(u1[02-9ac-hj-np-z]{100,}|zs1[02-9ac-hj-np-z]{60,})$/;
+export function signBonusClaim(code: string, round: number, ticket: number, accountId: string, snarkId: number): string {
+  if (!ACCOUNT_ID_RE.test(accountId)) throw new Error("account ID looks like ZR-7K4Q-M2XD");
+  return b64url(ed25519.sign(utf8ToBytes(bonusClaimMessage(round, ticket, destHash(accountId), snarkId)), secretOf(code)));
+}
 
-/**
- * Network fee charged on a withdrawal of n tickets. Pool notes are often
- * 0.1 ZEC each, so a payout may spend ~n notes; ZIP-317 charges per action,
- * minimum 2. Conservative on purpose — any excess stays in the pot.
- */
+export function verifyBonusClaim(pk: string, round: number, ticket: number, accountHash: string, snarkId: number, sig: string): boolean {
+  try {
+    return ed25519.verify(fromB64url(sig), utf8ToBytes(bonusClaimMessage(round, ticket, accountHash, snarkId)), fromB64url(pk));
+  } catch {
+    return false;
+  }
+}
+
+/* ---------------- withdraw (rolled tickets only, SPEC §4.7) ---------------- */
+
 export function withdrawFeeZats(tickets: number, params: Params = DEFAULT_PARAMS): number {
   return params.feePerActionZats * Math.max(2, tickets + 1);
 }
@@ -234,7 +303,6 @@ export function withdrawAmountZats(tickets: number, params: Params = DEFAULT_PAR
   return tickets * params.ticketZats - withdrawFeeZats(tickets, params);
 }
 
-/** Binds the open round, the ticket key, the destination and the exact payout. */
 export function withdrawMessage(round: number, pk: string, tickets: number, amountZats: number, to: string): string {
   return `${PROTOCOL}|withdraw|round=${round}|pk=${pk}|tickets=${tickets}|amount=${amountZats}|to=${to}`;
 }
@@ -242,8 +310,7 @@ export function withdrawMessage(round: number, pk: string, tickets: number, amou
 export function signWithdraw(code: string, round: number, tickets: number, amountZats: number, to: string): string {
   if (!SHIELDED_ADDR_RE.test(to)) throw new Error("use a shielded address starting with u1 or zs1");
   const key = keyFromCode(code);
-  const sk = fromB64url(code.trim().slice(CODE_PREFIX.length));
-  return b64url(ed25519.sign(utf8ToBytes(withdrawMessage(round, key.pk, tickets, amountZats, to)), sk));
+  return b64url(ed25519.sign(utf8ToBytes(withdrawMessage(round, key.pk, tickets, amountZats, to)), secretOf(code)));
 }
 
 export function verifyWithdraw(pk: string, round: number, tickets: number, amountZats: number, to: string, sig: string): boolean {
@@ -257,7 +324,24 @@ export function verifyWithdraw(pk: string, round: number, tickets: number, amoun
 
 /* ---------------- public round record ---------------- */
 
-export type RoundStatus = "open" | "closed" | "rolled" | "drawn" | "purchase_pending" | "purchased" | "claimed" | "expired";
+/**
+ * open → closed (waiting for the seed block) → drawn (waiting for the claim)
+ *      → claimed (payout queued) → paid
+ * open → rolled (no tickets)          drawn → expired (prize rolls forward)
+ */
+export type RoundStatus = "open" | "closed" | "rolled" | "drawn" | "claimed" | "paid" | "expired";
+
+export interface BonusRecord {
+  snarkId: number;
+  /** The drawn rounds whose tickets were eligible, in order. */
+  rounds: number[];
+  listHash: string;
+  ticketCount: number;
+  /** Index into the concatenated ticket lists of `rounds`. */
+  winner: number;
+  status: "drawn" | "claimed" | "delivered" | "expired";
+  claim?: { toHash: string; sig: string; deliveredAt?: string };
+}
 
 export interface RoundRecord {
   round: number;
@@ -267,18 +351,20 @@ export interface RoundRecord {
   closeHeight: number;
   seedHeight: number;
   potZats: number;
-  floorZatsAtClose?: number;
-  targetZats?: number;
-  tickets: string[]; // ticket lines in canonical order
-  /** The first `carriedCount` tickets came from earlier unfilled rounds (withdrawable while this round is open). */
+  paymentNotes: number;
+  feeBaseZats: number;
+  carriedZats: number;
+  tickets: string[];
+  /** The first `carriedCount` tickets came from an earlier round that rolled. */
   carriedCount: number;
-  /** Carried tickets withdrawn during this round. Destination addresses are never published. */
   withdrawn: { tickets: string[]; amountZats: number; feeZats: number; txid?: string }[];
   listHash?: string;
   seedBlockHash?: string;
   winner?: number;
-  purchase?: { snarkId: number; priceZats: number; orderId: string; paymentTxid: string };
-  claim?: { to: string; sig: string; transferredAt: string };
+  split?: PotSplit;
+  feeTxid?: string;
+  claim?: { toHash: string; amountZats: number; sig: string; txid?: string; paidAt?: string };
+  bonus?: BonusRecord;
 }
 
 export interface VerifyResult {
@@ -286,25 +372,48 @@ export interface VerifyResult {
   checks: { name: string; ok: boolean; detail: string }[];
 }
 
-/** Re-derives everything a third party can check from a published round file. */
+/** Re-derives everything a third party can check from one published round file. */
 export function verifyRound(r: RoundRecord): VerifyResult {
   const checks: VerifyResult["checks"] = [];
-  const tickets: Ticket[] = r.tickets.map((line) => {
-    const [txid, outIndex, k, pk] = line.split(":");
-    return { txid: txid!, outIndex: Number(outIndex), k: Number(k), pk: pk!, height: 0 };
-  });
+  const tickets = r.tickets.map(parseLine);
   const lh = listHash(tickets);
   checks.push({ name: "listHash", ok: !r.listHash || lh === r.listHash, detail: lh });
   if (r.seedBlockHash && r.winner !== undefined) {
     const w = winnerIndex(r.round, r.seedBlockHash, tickets);
     checks.push({ name: "winner", ok: w === r.winner, detail: `computed ${w}, published ${r.winner}` });
   }
+  if (r.split) {
+    const s = potSplit(r.split.feeBaseZats, r.split.carriedZats, r.paymentNotes, r.params);
+    const ok = s.feeZats === r.split.feeZats && s.prizeZats === r.split.prizeZats && s.networkZats === r.split.networkZats;
+    checks.push({ name: "fee and prize", ok, detail: `fee ${zatsToZec(s.feeZats)} ZEC, prize ${zatsToZec(s.prizeZats)} ZEC` });
+  }
   if (r.claim && r.winner !== undefined) {
     const pk = tickets[r.winner]?.pk ?? "";
     checks.push({
       name: "claim signature",
-      ok: verifyClaim(pk, r.round, r.winner, r.claim.to, r.claim.sig),
-      detail: `to ${r.claim.to}`,
+      ok: verifyClaim(pk, r.round, r.winner, r.claim.toHash, r.claim.amountZats, r.claim.sig),
+      detail: `prize ${zatsToZec(r.claim.amountZats)} ZEC`,
+    });
+  }
+  return { ok: checks.every((c) => c.ok), checks };
+}
+
+/** Checks a weekly bonus draw, given the ticket lists of the rounds it names. */
+export function verifyBonus(r: RoundRecord, ticketsByRound: Record<number, string[]>): VerifyResult {
+  const checks: VerifyResult["checks"] = [];
+  const b = r.bonus;
+  if (!b || !r.seedBlockHash) return { ok: true, checks };
+  const lines = b.rounds.flatMap((n) => ticketsByRound[n] ?? []);
+  const tickets = lines.map(parseLine);
+  checks.push({ name: "bonus listHash", ok: listHash(tickets) === b.listHash, detail: `${tickets.length} tickets` });
+  const w = bonusWinnerIndex(r.round, r.seedBlockHash, tickets);
+  checks.push({ name: "bonus winner", ok: w === b.winner, detail: `computed ${w}, published ${b.winner}` });
+  if (b.claim) {
+    const pk = tickets[b.winner]?.pk ?? "";
+    checks.push({
+      name: "bonus claim signature",
+      ok: verifyBonusClaim(pk, r.round, b.winner, b.claim.toHash, b.snarkId, b.claim.sig),
+      detail: `zkSNARK #${b.snarkId}`,
     });
   }
   return { ok: checks.every((c) => c.ok), checks };

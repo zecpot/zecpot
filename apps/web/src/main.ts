@@ -3,12 +3,14 @@ import { initSwap } from "./swap/ui.ts";
 import {
   keyFromCode,
   newTicketKey,
+  signBonusClaim,
   signClaim,
   signWithdraw,
   ticketMemo,
+  verifyBonus,
+  verifyRound,
   withdrawAmountZats,
   withdrawFeeZats,
-  verifyRound,
   zatsToZec,
   zip321Uri,
   type RoundRecord,
@@ -16,21 +18,38 @@ import {
 } from "../../../packages/core/src/index.ts";
 
 interface PublicState {
-  params: { ticketZats: number; roundBlocks: number };
+  params: { ticketZats: number; roundBlocks: number; feeBps: number; bonusEveryRounds: number; claimWindowBlocks: number };
   poolAddress: string;
   viewingKey: string;
   mode: "mock" | "live";
   floorZats: number | null;
   scannedHeight: number;
-  open: { round: number; closeHeight: number; potZats: number; tickets: number; targetZats: number | null; ticketsNeeded: number | null };
-  rounds: { round: number; status: string; tickets: number; potZats: number; winner: number | null; snarkId: number | null }[];
+  open: { round: number; closeHeight: number; potZats: number; tickets: number; prizeIfDrawnZats: number; feeIfDrawnZats: number };
+  treasury: {
+    address: string;
+    viewingKey: string;
+    balanceZats: number | null;
+    sweepTargetZats: number | null;
+    snarks: number[];
+    sweeps: { snarkId: number; priceZats: number; at: string }[];
+    nextBonusRound: number;
+  };
+  rounds: {
+    round: number;
+    status: string;
+    tickets: number;
+    potZats: number;
+    winner: number | null;
+    prizeZats: number | null;
+    bonus: { snarkId: number; status: string; winner: number; ticketCount: number } | null;
+  }[];
 }
-type PubRound = RoundRecord & { bonusSnarkIds?: number[] };
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const BLOCK_SECONDS = 75;
+const MAX_STUBS = 60;
 let state: PublicState | null = null;
-let lastFilled = -1;
+let lastTickets = -1;
 let pending: { key: TicketKey; n: number; uri: string } | null = null;
 
 /* ---------------- helpers ---------------- */
@@ -72,82 +91,112 @@ async function post(path: string, body: unknown) {
 }
 
 function eta(blocks: number) {
-  if (blocks <= 0) return "now";
+  if (blocks <= 0) return "a few minutes";
   const mins = Math.round((blocks * BLOCK_SECONDS) / 60);
-  return mins < 90 ? `about ${mins} min` : `about ${Math.round(mins / 60)} h`;
+  if (mins < 90) return `about ${mins} min`;
+  const h = Math.round(mins / 60);
+  return h < 36 ? `about ${h} h` : `about ${Math.round(h / 24)} days`;
 }
 
+const zec = (zats: number) => `${zatsToZec(zats)} ZEC`;
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const isMock = () => state?.mode === "mock";
+const rounds = new Map<number, RoundRecord>();
+async function roundFile(n: number) {
+  const r = await getJSON<RoundRecord>(`/data/rounds/${n}.json`);
+  rounds.set(n, r);
+  return r;
+}
 
 /* ---------------- render ---------------- */
 
 function renderHero(s: PublicState) {
-  const t = s.params.ticketZats;
-  const filled = Math.floor(s.open.potZats / t);
-  const total = Math.min(40, Math.max(s.open.targetZats ? Math.ceil(s.open.targetZats / t) : 6, filled));
+  const n = s.open.tickets;
+  $("pot-amount").textContent = zatsToZec(s.open.potZats);
   const slots = $("slots");
-  slots.replaceChildren(
-    ...Array.from({ length: total }, (_, i) => {
-      const d = document.createElement("div");
-      d.className = "slot " + (i < filled ? "full" : "empty");
-      if (s.open.targetZats && i >= Math.ceil(s.open.targetZats / t)) d.classList.add("extra");
-      if (lastFilled >= 0 && i >= lastFilled && i < filled) d.classList.add("new");
-      return d;
-    }),
-  );
-  slots.setAttribute("aria-label", `${filled} of ${total} ticket slots filled`);
-  lastFilled = filled;
+  const shown = Math.min(n, MAX_STUBS);
+  const stubs: HTMLElement[] = Array.from({ length: Math.max(shown, 1) }, (_, i) => {
+    const d = document.createElement("div");
+    d.className = "slot " + (i < shown ? "full" : "empty");
+    if (lastTickets >= 0 && i >= lastTickets && i < shown) d.classList.add("new");
+    return d;
+  });
+  if (n > MAX_STUBS) stubs.push(Object.assign(document.createElement("span"), { className: "more", textContent: `+${n - MAX_STUBS}` }));
+  slots.replaceChildren(...stubs);
+  slots.setAttribute("aria-label", `${plural(n, "ticket")} in today’s pot`);
+  lastTickets = shown;
 
-  const need = s.open.ticketsNeeded;
-  $("hero-line").textContent =
-    need === null
-      ? "Today’s zkSNARK is waiting for tickets."
-      : need === 0
-        ? "The pot covers a zkSNARK. It gets drawn when this round closes."
-        : `${need} more ticket${need === 1 ? "" : "s"} and today’s zkSNARK gets drawn.`;
-
-  const blocksLeft = s.open.closeHeight - s.scannedHeight;
+  const left = s.open.closeHeight - s.scannedHeight;
   const sub = $("hero-sub");
-  sub.innerHTML = "";
-  const floor = s.floorZats ? `${zatsToZec(s.floorZats)} ZEC` : "unknown";
-  sub.append(
-    "Prize: the cheapest zkSNARK on Zilkroad, now ",
-    Object.assign(document.createElement("strong"), { textContent: floor }),
-    `. Pot so far: `,
-    Object.assign(document.createElement("strong"), { textContent: `${zatsToZec(s.open.potZats)} ZEC` }),
-    `. Round closes in ${eta(blocksLeft)}.`,
-  );
-  $("round-meta").textContent = `Round ${s.open.round}, closes at block ${s.open.closeHeight.toLocaleString("en")}`;
+  sub.replaceChildren();
+  if (n === 0) {
+    sub.append(`No tickets yet. Buy the first one and, if nobody else joins, it wins the pot. Draw in ${eta(left)}.`);
+  } else {
+    sub.append(
+      `${plural(n, "ticket")} so far. If drawn now, the winning ticket takes `,
+      Object.assign(document.createElement("strong"), { textContent: zec(s.open.prizeIfDrawnZats) }),
+      `. Draw in ${eta(left)}.`,
+    );
+  }
+  $("round-meta").textContent = `Pot ${s.open.round}, draws after block ${s.open.closeHeight.toLocaleString("en")}`;
   $("viewing-key").textContent = s.viewingKey;
   $("mock-panel").hidden = !isMock();
   $("mock-pay").hidden = !isMock();
+}
+
+function renderTreasury(s: PublicState) {
+  const t = s.treasury;
+  const bal = t.balanceZats ?? 0;
+  const target = t.sweepTargetZats;
+  const pct = target ? Math.min(100, Math.round((bal / target) * 100)) : 0;
+  $("tr-fill").style.width = `${pct}%`;
+  $("tr-bar").setAttribute("aria-valuenow", String(pct));
+  $("tr-nums").textContent = target
+    ? `${zec(bal)} of ${zec(target)} (floor ${s.floorZats ? zec(s.floorZats) : "unknown"} plus 5% headroom)`
+    : `${zec(bal)} saved. The floor price is unavailable right now.`;
+  const held = $("tr-snarks");
+  held.replaceChildren();
+  if (t.snarks.length === 0) held.textContent = "None yet";
+  for (const id of t.snarks) {
+    held.append(Object.assign(document.createElement("a"), { href: `https://zilkroad.com/explorer/${id}`, target: "_blank", rel: "noopener noreferrer", textContent: `zkSNARK #${id}` }), " ");
+  }
+  const roundsLeft = t.nextBonusRound - s.open.round;
+  $("tr-bonus").textContent =
+    t.snarks.length > 0
+      ? `Next bonus draw: pot ${t.nextBonusRound}, ${roundsLeft === 0 ? "today" : `in ${plural(roundsLeft, "day")}`}. Every ticket from pot ${t.nextBonusRound - s.params.bonusEveryRounds + 1} to pot ${t.nextBonusRound} is in it.`
+      : `The weekly bonus draw starts once the treasury holds a zkSNARK. Next possible draw: pot ${t.nextBonusRound}.`;
+  $("tr-key").textContent = t.viewingKey;
 }
 
 async function renderPast(s: PublicState) {
   const done = s.rounds.filter((r) => r.status !== "open").slice(-10).reverse();
   const list = $("past");
   if (done.length === 0) {
-    list.innerHTML = `<li class="none">No round has closed yet. The first draw happens when a round’s pot covers the floor.</li>`;
+    list.innerHTML = `<li class="none">No pot has been drawn yet. The first draw happens when today’s pot closes.</li>`;
     return;
   }
   const rows = await Promise.all(
     done.map(async (r) => {
       const li = document.createElement("li");
-      const n = Object.assign(document.createElement("span"), { className: "n", textContent: `Round ${r.round}` });
+      const n = Object.assign(document.createElement("span"), { className: "n", textContent: `Pot ${r.round}` });
       const what = document.createElement("span");
       const badge = document.createElement("span");
-      if (r.status === "rolled") {
-        what.textContent = `Rolled over with ${r.tickets} ticket${r.tickets === 1 ? "" : "s"}`;
-      } else if (r.winner === null) {
-        what.textContent = `Closed with ${r.tickets} tickets, waiting for the seed block`;
-      } else {
-        const prize = r.snarkId ? `zkSNARK #${r.snarkId}` : "the floor zkSNARK";
-        const tail =
-          r.status === "claimed" ? "delivered" : r.status === "expired" ? "unclaimed, carried into a later draw" : r.status === "purchased" ? "waiting for the winner to claim" : "being bought";
-        what.textContent = `Ticket ${r.winner} of ${r.tickets} won ${prize}, ${tail}`;
+      if (r.status === "rolled") what.textContent = "No tickets, so the pot rolled into the next day";
+      else if (r.winner === null) what.textContent = `${plural(r.tickets, "ticket")}, waiting for the draw block`;
+      else {
+        const tail = r.status === "paid" ? "paid" : r.status === "claimed" ? "being paid" : r.status === "expired" ? "unclaimed, rolled into a later pot" : "waiting for the winner to claim";
+        what.textContent = `Ticket ${r.winner} of ${r.tickets} won ${r.prizeZats !== null ? zec(r.prizeZats) : "the pot"}, ${tail}`;
+        if (r.bonus) what.append(Object.assign(document.createElement("small"), { textContent: ` Bonus: zkSNARK #${r.bonus.snarkId} to ticket ${r.bonus.winner} of the week’s ${r.bonus.ticketCount}, ${r.bonus.status}.` }));
         try {
-          const rec = await getJSON<PubRound>(`/data/rounds/${r.round}.json`);
+          const rec = await roundFile(r.round);
           const v = verifyRound(rec);
+          if (rec.bonus) {
+            const byRound: Record<number, string[]> = {};
+            for (const x of rec.bonus.rounds) byRound[x] = (rounds.get(x) ?? (await roundFile(x))).tickets;
+            const vb = verifyBonus(rec, byRound);
+            v.checks.push(...vb.checks);
+            v.ok &&= vb.ok;
+          }
           badge.className = v.ok ? "verified" : "failed";
           badge.textContent = v.ok ? "Verified" : "Check failed";
           badge.title = v.checks.map((c) => `${c.ok ? "ok" : "FAIL"} ${c.name}: ${c.detail}`).join("\n");
@@ -167,9 +216,10 @@ async function refresh() {
   try {
     state = await getJSON<PublicState>("/data/state.json");
     renderHero(state);
+    renderTreasury(state);
     await renderPast(state);
   } catch {
-    $("round-meta").textContent = "Can’t reach the round data. Retrying.";
+    $("round-meta").textContent = "Can’t reach the pot data. Retrying.";
   }
 }
 
@@ -177,25 +227,25 @@ async function refresh() {
 
 function count() {
   const el = $<HTMLInputElement>("count");
-  const n = Math.max(1, Math.min(20, Math.floor(Number(el.value) || 1)));
+  const n = Math.max(1, Math.min(500, Math.floor(Number(el.value) || 1)));
   el.value = String(n);
   return n;
 }
 function updatePrice() {
-  const t = state?.params.ticketZats ?? 10_000_000;
-  $("price").textContent = `${zatsToZec(count() * t)} ZEC`;
+  const t = state?.params.ticketZats ?? 1_000_000;
+  $("price").textContent = zec(count() * t);
 }
 
 function startBuy(e: Event) {
   e.preventDefault();
-  if (!state) return toast("Round data hasn’t loaded yet");
+  if (!state) return toast("Pot data hasn’t loaded yet");
   const n = count();
   const key = newTicketKey(); // fresh key every purchase, so purchases can’t be linked
   const zats = n * state.params.ticketZats;
   const uri = zip321Uri(state.poolAddress, zats, ticketMemo(key.pk));
   pending = { key, n, uri };
-  const codes = JSON.parse(store.get("snarkpot.codes") ?? "[]") as string[];
-  store.set("snarkpot.codes", JSON.stringify([...codes, key.code].slice(-50)));
+  const codes = JSON.parse(store.get("zecpot.codes") ?? "[]") as string[];
+  store.set("zecpot.codes", JSON.stringify([...codes, key.code].slice(-50)));
 
   $("ticket-code").textContent = key.code;
   $<HTMLInputElement>("saved").checked = false;
@@ -204,7 +254,7 @@ function startBuy(e: Event) {
   qr.addData(uri);
   qr.make();
   $("qr").innerHTML = qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
-  $("pay-amount").textContent = `${zatsToZec(zats)} ZEC for ${n} ticket${n === 1 ? "" : "s"}`;
+  $("pay-amount").textContent = `${zec(zats)} for ${plural(n, "ticket")}`;
   $<HTMLAnchorElement>("pay-link").href = uri;
   $("buy-panel").hidden = false;
   $("buy-panel").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
@@ -224,81 +274,74 @@ async function check(e: Event) {
     return;
   }
   if (!state) return;
-  const rounds = await Promise.all(state.rounds.slice(-30).map((r) => getJSON<PubRound>(`/data/rounds/${r.round}.json`).catch(() => null)));
-  // A carried ticket appears in several rounds; the latest one is its current state.
-  const latest = new Map<string, { r: PubRound; idx: number }>();
-  const withdrawn: { round: number; n: number; amountZats: number; sent: boolean }[] = [];
-  const gone = new Set<string>();
-  for (const r of rounds) {
-    for (const w of r?.withdrawn ?? []) {
-      const mine = w.tickets.filter((l) => l.endsWith(":" + key.pk));
-      if (mine.length === 0) continue;
-      mine.forEach((l) => gone.add(l));
-      withdrawn.push({ round: r!.round, n: mine.length, amountZats: w.amountZats, sent: !!w.txid });
-    }
-  }
-  for (const r of rounds) {
-    if (!r) continue;
-    r.tickets.forEach((line, idx) => {
-      if (line.endsWith(":" + key.pk) && !gone.has(line)) latest.set(line.split(":").slice(0, 3).join(":"), { r, idx });
-    });
-  }
-  for (const w of withdrawn) {
+  const recs = (await Promise.all(state.rounds.slice(-30).map((r) => roundFile(r.round).catch(() => null)))).filter((r): r is RoundRecord => !!r);
+  const mine = (line: string) => line.endsWith(":" + key.pk);
+  let any = false;
+  const result = (...nodes: (string | Node)[]) => {
     const div = Object.assign(document.createElement("div"), { className: "result" });
-    div.append(Object.assign(document.createElement("p"), {
-      textContent: `${w.n} ticket${w.n === 1 ? "" : "s"} withdrawn in round ${w.round}. ${zatsToZec(w.amountZats)} ZEC ${w.sent ? "was sent" : "is being sent"} to the address you gave.`,
-    }));
+    div.append(...nodes);
     out.append(div);
-  }
-  if (latest.size === 0 && withdrawn.length > 0) return;
-  if (latest.size === 0) {
-    out.textContent = "No tickets for this code yet. A payment shows up once it’s in a block, usually within a few minutes.";
-    return;
-  }
-  const byRound = new Map<number, { r: PubRound; idxs: number[] }>();
-  for (const { r, idx } of latest.values()) {
-    const e2 = byRound.get(r.round) ?? { r, idxs: [] };
-    e2.idxs.push(idx);
-    byRound.set(r.round, e2);
-  }
-  for (const { r, idxs } of byRound.values()) {
-    const div = document.createElement("div");
-    div.className = "result";
-    const n = idxs.length;
-    const head = document.createElement("p");
-    const won = r.winner !== undefined && idxs.includes(r.winner);
-    const carried = idxs.filter((i) => i < (r.carriedCount ?? 0)).length;
-    if (r.status === "open" && carried > 0) {
-      head.textContent =
-        `${carried} ticket${carried === 1 ? "" : "s"} came from a round that didn’t fill, so ${carried === 1 ? "it’s" : "they’re"} in round ${r.round} automatically.` +
-        (n > carried ? ` You also have ${n - carried} new ticket${n - carried === 1 ? "" : "s"} here.` : "");
-    } else if (r.status === "open") head.textContent = `${n} ticket${n === 1 ? "" : "s"} in round ${r.round}, which is still open.`;
-    else if (r.status === "rolled") head.textContent = `${n} ticket${n === 1 ? "" : "s"} carried forward from round ${r.round}.`;
-    else if (r.status === "closed") head.textContent = `${n} ticket${n === 1 ? "" : "s"} in round ${r.round}. The draw happens a few blocks after closing.`;
-    else if (!won) head.textContent = `${n} ticket${n === 1 ? "" : "s"} in round ${r.round}. Ticket ${r.winner} won this time.`;
-    else {
-      head.innerHTML = `<span class="won">Ticket ${r.winner} won round ${r.round}.</span>`;
-      if (r.status === "claimed") head.append(` It was delivered to ${r.claim?.to}.`);
-      if (r.status === "expired") head.append(" The claim window has closed.");
+    any = true;
+    return div;
+  };
+  const p = (text: string, cls = "") => Object.assign(document.createElement("p"), { textContent: text, className: cls });
+
+  for (const r of recs) {
+    for (const w of r.withdrawn ?? []) {
+      const n = w.tickets.filter(mine).length;
+      if (n) result(p(`${plural(n, "ticket")} withdrawn from pot ${r.round}. ${zec(w.amountZats)} ${w.txid ? "was sent" : "is being sent"} to the address you gave.`));
     }
-    div.append(head);
-    if (r.status === "open" && carried > 0 && state) div.append(withdrawForm(key, r, carried));
-    if (won && (r.status === "purchased" || r.status === "purchase_pending")) div.append(claimForm(key, r));
-    out.append(div);
+    const idxs = r.tickets.map((l, i) => (mine(l) ? i : -1)).filter((i) => i >= 0);
+    const carried = idxs.filter((i) => i < (r.carriedCount ?? 0)).length;
+    if (idxs.length) {
+      const n = idxs.length;
+      const won = r.winner !== undefined && idxs.includes(r.winner);
+      if (r.status === "open" && carried > 0) {
+        result(p(`${plural(carried, "ticket")} rolled in from an earlier pot, so ${carried === 1 ? "it’s" : "they’re"} in pot ${r.round} automatically.`), withdrawForm(key, r, carried));
+      } else if (r.status === "open") {
+        const odds = state.open.round === r.round && state.open.tickets ? ` That’s ${n} in ${state.open.tickets} right now.` : "";
+        result(p(`${plural(n, "ticket")} in today’s pot ${r.round}.${odds}`));
+      } else if (r.status === "rolled") {
+        /* shown in the round they rolled into */
+      } else if (r.status === "closed") {
+        result(p(`${plural(n, "ticket")} in pot ${r.round}. The draw happens a few blocks after it closed.`));
+      } else if (!won) {
+        result(p(`${plural(n, "ticket")} in pot ${r.round}. Ticket ${r.winner} won this time.`));
+      } else {
+        const div = result(p(`Ticket ${r.winner} won pot ${r.round}: ${zec(r.split!.prizeZats)}.`, "won"));
+        if (r.status === "drawn") div.append(prizeForm(key, r));
+        if (r.status === "claimed") div.append(p("Claimed. The ZEC is on its way to the address you gave."));
+        if (r.status === "paid") div.append(p("Paid to the address you gave."));
+        if (r.status === "expired") div.append(p("The claim window has closed; the prize rolled into a later pot."));
+      }
+    }
+    // weekly bonus
+    if (r.bonus) {
+      const lines = r.bonus.rounds.flatMap((n) => recs.find((x) => x.round === n)?.tickets ?? []);
+      const line = lines[r.bonus.winner];
+      if (line && mine(line)) {
+        const div = result(p(`Your ticket won the weekly bonus in pot ${r.round}: zkSNARK #${r.bonus.snarkId}.`, "won"));
+        if (r.bonus.status === "drawn") div.append(bonusForm(key, r));
+        if (r.bonus.status === "claimed") div.append(p("Claimed. It’s being transferred to your Zilkroad account."));
+        if (r.bonus.status === "delivered") div.append(p("Delivered to your Zilkroad account."));
+        if (r.bonus.status === "expired") div.append(p("The claim window has closed; it went back to the treasury."));
+      }
+    }
   }
+  if (!any) out.textContent = "No tickets for this code yet. A payment shows up once it’s in a block, usually within a few minutes.";
 }
 
-function withdrawForm(key: TicketKey, r: PubRound, n: number) {
+function withdrawForm(key: TicketKey, r: RoundRecord, n: number) {
   const amount = withdrawAmountZats(n, r.params);
   const fee = withdrawFeeZats(n, r.params);
   const f = document.createElement("form");
   f.className = "claim";
   f.innerHTML = `
     <p class="hint">Do nothing and ${n === 1 ? "it stays" : "they stay"} in. Or take your ZEC back before block ${r.closeHeight.toLocaleString("en")}:
-    <strong>${zatsToZec(amount)} ZEC</strong> (${zatsToZec(n * r.params.ticketZats)} minus a ${zatsToZec(fee)} ZEC network fee).</p>
+    <strong>${zec(amount)}</strong> (${zec(n * r.params.ticketZats)} minus a ${zec(fee)} network fee).</p>
     <label for="wto">Shielded address to receive it. A fresh one keeps the refund unlinked from your other payments.</label>
     <div class="inline"><input id="wto" placeholder="u1…" autocomplete="off" spellcheck="false" />
-    <button type="submit">Withdraw ${zatsToZec(amount)} ZEC</button></div>
+    <button type="submit">Withdraw ${zec(amount)}</button></div>
     <p class="msg" aria-live="polite"></p>`;
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -307,7 +350,7 @@ function withdrawForm(key: TicketKey, r: PubRound, n: number) {
     try {
       const sig = signWithdraw(key.code, r.round, n, amount, to); // signed here; the code never leaves the browser
       const res = await post("/api/withdraw", { round: r.round, pk: key.pk, to, sig });
-      msg.textContent = res.ok ? `Withdrawn. ${zatsToZec(amount)} ZEC is on its way to that address.` : `Withdrawal not accepted: ${res.error}.`;
+      msg.textContent = res.ok ? `Withdrawn. ${zec(amount)} is on its way to that address.` : `Withdrawal not accepted: ${res.error}.`;
       if (res.ok) { f.querySelector("button")!.disabled = true; refresh(); }
     } catch (err) {
       msg.textContent = `Withdrawal not accepted: ${(err as Error).message}.`;
@@ -316,23 +359,49 @@ function withdrawForm(key: TicketKey, r: PubRound, n: number) {
   return f;
 }
 
-function claimForm(key: TicketKey, r: PubRound) {
+function prizeForm(key: TicketKey, r: RoundRecord) {
+  const amount = r.split!.prizeZats;
   const f = document.createElement("form");
   f.className = "claim";
   f.innerHTML = `
-    <label for="acct">Send the zkSNARK to this Zilkroad account. A fresh account keeps this win separate from anything else you own.</label>
-    <div class="inline"><input id="acct" placeholder="ZR-7K4Q-M2XD" autocomplete="off" spellcheck="false" />
-    <button type="submit" class="primary">Claim zkSNARK</button></div>
+    <label for="pto">Shielded address to receive ${zec(amount)}. A fresh one keeps this win unlinked from your other payments. Only a hash of it is published.</label>
+    <div class="inline"><input id="pto" placeholder="u1…" autocomplete="off" spellcheck="false" />
+    <button type="submit" class="primary">Claim ${zec(amount)}</button></div>
     <p class="msg" aria-live="polite"></p>`;
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     const msg = f.querySelector(".msg")!;
-    const to = (f.querySelector("#acct") as HTMLInputElement).value.trim().toUpperCase();
+    const to = (f.querySelector("#pto") as HTMLInputElement).value.trim();
     try {
-      const sig = signClaim(key.code, r.round, r.winner!, to); // signed here; the code never leaves the browser
+      const sig = signClaim(key.code, r.round, r.winner!, to, amount); // signed here; the code never leaves the browser
       const res = await post("/api/claim", { round: r.round, ticket: r.winner, to, sig });
-      msg.textContent = res.ok ? `Claimed. The zkSNARK will arrive in ${to} within a few minutes.` : `Claim not accepted: ${res.error}.`;
-      if (res.ok) refresh();
+      msg.textContent = res.ok ? `Claimed. ${zec(amount)} will arrive within a few minutes.` : `Claim not accepted: ${res.error}.`;
+      if (res.ok) { f.querySelector("button")!.disabled = true; refresh(); }
+    } catch (err) {
+      msg.textContent = `Claim not accepted: ${(err as Error).message}.`;
+    }
+  });
+  return f;
+}
+
+function bonusForm(key: TicketKey, r: RoundRecord) {
+  const b = r.bonus!;
+  const f = document.createElement("form");
+  f.className = "claim";
+  f.innerHTML = `
+    <label for="bto">Zilkroad account ID to send zkSNARK #${b.snarkId} to. A fresh account keeps this win separate from anything else you own.</label>
+    <div class="inline"><input id="bto" placeholder="ZR-7K4Q-M2XD" autocomplete="off" spellcheck="false" />
+    <button type="submit" class="primary">Claim zkSNARK #${b.snarkId}</button></div>
+    <p class="msg" aria-live="polite"></p>`;
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = f.querySelector(".msg")!;
+    const to = (f.querySelector("#bto") as HTMLInputElement).value.trim().toUpperCase();
+    try {
+      const sig = signBonusClaim(key.code, r.round, b.winner, to, b.snarkId);
+      const res = await post("/api/bonus-claim", { round: r.round, ticket: b.winner, to, sig });
+      msg.textContent = res.ok ? `Claimed. zkSNARK #${b.snarkId} will arrive in ${to} soon.` : `Claim not accepted: ${res.error}.`;
+      if (res.ok) { f.querySelector("button")!.disabled = true; refresh(); }
     } catch (err) {
       msg.textContent = `Claim not accepted: ${(err as Error).message}.`;
     }
@@ -351,13 +420,14 @@ document.addEventListener("DOMContentLoaded", () => {
   $("copy-code").addEventListener("click", () => pending && copy(pending.key.code, "Ticket code"));
   $("download-code").addEventListener("click", () => {
     if (!pending) return;
-    const blob = new Blob([`SNARKPOT ticket code (keep this private)\n${pending.key.code}\n\nTickets: ${pending.n}\n`], { type: "text/plain" });
-    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: "snarkpot-ticket.txt" });
+    const blob = new Blob([`zecPOT ticket code (keep this private)\n${pending.key.code}\n\nTickets: ${pending.n}\n`], { type: "text/plain" });
+    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: "zecpot-ticket.txt" });
     a.click();
     URL.revokeObjectURL(a.href);
   });
   $("copy-uri").addEventListener("click", () => pending && copy(pending.uri, "Payment link"));
-  $("copy-viewing-key").addEventListener("click", () => state && copy(state.viewingKey, "Viewing key"));
+  $("copy-viewing-key").addEventListener("click", () => state && copy(state.viewingKey, "Pot viewing key"));
+  $("copy-tr-key").addEventListener("click", () => state && copy(state.treasury.viewingKey, "Treasury viewing key"));
   $("check-form").addEventListener("submit", check);
 
   $("mock-pay").addEventListener("click", async () => {
@@ -377,10 +447,12 @@ document.addEventListener("DOMContentLoaded", () => {
       await refresh();
     }),
   );
+  $("mock-gift").addEventListener("click", async () => { await post("/api/mock/treasury", {}); toast("Treasury topped up on the demo chain"); await refresh(); });
 
   // Swap default: the tickets in the stepper + 0.0002 ZEC for the fee on the payment to the pot.
-  initSwap({ defaultZats: () => count() * (state?.params.ticketZats ?? 10_000_000) + 20_000, toast });
+  initSwap({ defaultZats: () => count() * (state?.params.ticketZats ?? 1_000_000) + 20_000, toast });
 
   refresh().then(updatePrice);
   setInterval(refresh, 10_000);
 });
+

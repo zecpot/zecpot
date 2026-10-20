@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="referrer" content="no-referrer" />
-  <title>SNARKPOT</title>
-  <meta name="description" content="A daily private draw for one zkSNARK, paid with shielded ZEC." />
+  <title>zecPOT</title>
+  <meta name="description" content="A daily private ZEC pot on Zcash. The winner takes the pot; 5% sweeps floor zkSNARKs for a weekly bonus." />
   <link rel="preload" href="/fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="/style.css" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='9' width='24' height='14' rx='3' fill='%23F4B728'/%3E%3C/svg%3E" />
@@ -13,24 +13,25 @@
 </head>
 <body>
   <header class="top">
-    <a class="mark" href="/">snarkpot</a>
+    <a class="mark" href="/">zecPOT</a>
     <p class="round-meta" id="round-meta">Loading the current round…</p>
   </header>
 
   <main>
     <section class="hero" aria-labelledby="hero-h">
-      <h1 id="hero-h"><span id="hero-line">Today’s zkSNARK is waiting for tickets.</span></h1>
-      <div class="slots" id="slots" role="img" aria-label="Ticket progress"></div>
+      <p class="hero-kicker" id="hero-kicker">Today’s pot</p>
+      <h1 id="hero-h"><span id="pot-amount">0</span> <span class="unit">ZEC</span></h1>
+      <div class="slots" id="slots" role="img" aria-label="Tickets in today’s pot"></div>
       <p class="hero-sub" id="hero-sub"></p>
 
       <form class="buy-bar" id="buy-form">
         <label for="count">Tickets</label>
         <div class="stepper">
           <button type="button" id="minus" aria-label="One fewer ticket">−</button>
-          <input id="count" name="count" type="number" inputmode="numeric" min="1" max="20" value="1" />
+          <input id="count" name="count" type="number" inputmode="numeric" min="1" max="500" value="1" />
           <button type="button" id="plus" aria-label="One more ticket">+</button>
         </div>
-        <output id="price" for="count">0.1 ZEC</output>
+        <output id="price" for="count">0.01 ZEC</output>
         <button type="submit" class="primary">Buy tickets</button>
         <button type="button" class="link" id="open-swap">No ZEC yet? Swap USDC or USDT</button>
       </form>
@@ -51,7 +52,7 @@
         </li>
         <li id="pay-step" class="locked">
           <h3>Pay from a shielded wallet</h3>
-          <p>Scan with Zodl or any Orchard wallet. The memo is already filled in; don’t change it, or the payment won’t become a ticket.</p>
+          <p>Scan with Zodl or any shielded Zcash wallet. The memo is already filled in; don’t change it, or the payment won’t become a ticket.</p>
           <div class="pay">
             <div class="qr" id="qr" aria-label="Payment QR code"></div>
             <div class="pay-detail">
@@ -84,6 +85,30 @@
       <p class="note">This swap is public on the sending network, and NEAR Intents records which Zcash address it paid. Paying the pot afterwards is shielded and isn’t linked to the swap. To make the two harder to match up, swap a bit more than you need and wait a while before you pay.</p>
     </section>
 
+    <section class="panel treasury" aria-labelledby="tr-h">
+      <div class="tr-head">
+        <h2 id="tr-h">Treasury</h2>
+        <p class="tr-sub">5% of every pot buys floor zkSNARKs. Each week one goes to a random ticket.</p>
+      </div>
+      <div class="tr-grid">
+        <div>
+          <p class="tr-label" id="tr-label">Saving for the next floor zkSNARK</p>
+          <div class="bar" role="progressbar" id="tr-bar" aria-valuemin="0" aria-valuemax="100"><span id="tr-fill"></span></div>
+          <p class="tr-nums" id="tr-nums"></p>
+        </div>
+        <div>
+          <p class="tr-label">Held for the weekly bonus</p>
+          <p class="tr-snarks" id="tr-snarks">None yet</p>
+          <p class="tr-nums" id="tr-bonus"></p>
+        </div>
+      </div>
+      <div class="key-row">
+        <span>Treasury viewing key</span>
+        <code id="tr-key"></code>
+        <button type="button" id="copy-tr-key">Copy</button>
+      </div>
+    </section>
+
     <div class="cols">
       <section class="panel" aria-labelledby="mine-h">
         <h2 id="mine-h">Check your tickets</h2>
@@ -102,23 +127,25 @@
     </div>
 
     <section class="panel how" aria-labelledby="how-h">
-      <h2 id="how-h">How it stays private and fair</h2>
+      <h2 id="how-h">How zecPOT works</h2>
       <dl>
+        <dt>One pot a day</dt>
+        <dd>Tickets cost 0.01 ZEC and you can buy as many as you like. Once a day one ticket is drawn and takes the whole pot, minus 5% for the treasury and the Zcash network fee.</dd>
+        <dt>The 5% sweeps the floor</dt>
+        <dd>The treasury buys the cheapest zkSNARK on Zilkroad whenever it can afford one. Every week, one of those zkSNARKs is drawn for a random ticket from that week’s pots.</dd>
         <dt>No accounts</dt>
         <dd>A ticket is a key made in your browser. Its public half rides in the payment memo; the secret half is your ticket code.</dd>
         <dt>No sender data</dt>
         <dd>Shielded payments hide who paid. The pool sees an amount and a memo, nothing else.</dd>
-        <dt>Anyone can audit the pot</dt>
-        <dd>The pool’s viewing key is public. Load it into a view-only wallet to see every ticket that came in.</dd>
+        <dt>Anyone can audit the money</dt>
+        <dd>The pot’s and the treasury’s viewing keys are public. Load them into a view-only wallet to see every ticket that came in, every fee, and every sweep.</dd>
         <dt>Nobody picks the winner</dt>
         <dd>The ticket list locks at the closing block. The winner comes from the hash of a block mined after that, so anyone can recompute it.</dd>
-        <dt>No stuck money</dt>
-        <dd>If a round closes before its pot covers the prize, your tickets move into the next round on their own. Until that round closes, you can take your ZEC back instead, minus the network fee.</dd>
-        <dt>Delivery to a pseudonym</dt>
-        <dd>The winner signs a Zilkroad account ID with their ticket code. We buy the floor zkSNARK and send it there.</dd>
+        <dt>Claim without an account</dt>
+        <dd>The winner signs a shielded address with their ticket code and the prize is sent there. Only a hash of the address is published. Unclaimed prizes roll into a later pot after 14 days.</dd>
       </dl>
       <div class="key-row">
-        <span>Pool viewing key</span>
+        <span>Pot viewing key</span>
         <code id="viewing-key"></code>
         <button type="button" id="copy-viewing-key">Copy</button>
       </div>
@@ -130,7 +157,8 @@
       <div class="inline">
         <button type="button" data-bots="5">Add 5 strangers’ tickets</button>
         <button type="button" data-mine="10">Mine 10 blocks</button>
-        <button type="button" data-mine="40">Mine to the next round</button>
+        <button type="button" data-mine="40">Close today’s pot and draw</button>
+        <button type="button" id="mock-gift">Top up the treasury</button>
       </div>
     </section>
   </main>

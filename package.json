@@ -1,8 +1,8 @@
 {
-  "name": "snarkpot",
+  "name": "zecpot",
   "version": "0.1.0",
   "private": true,
-  "description": "Daily private draw for one zkSNARK, paid with shielded ZEC. ZECATHON entry.",
+  "description": "zecPOT: a daily private ZEC pot on Zcash. 5% of every pot sweeps floor zkSNARKs for a weekly bonus. ZECATHON entry.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -17,7 +17,8 @@
     "tick": "node --import tsx apps/engine/src/cli.ts tick",
     "verify": "node --import tsx apps/engine/src/cli.ts verify",
     "serve": "npm run build:web && node --import tsx apps/engine/src/cli.ts serve",
-    "blockhash": "node --import tsx apps/engine/src/cli.ts blockhash"
+    "blockhash": "node --import tsx apps/engine/src/cli.ts blockhash",
+    "op": "node --import tsx apps/engine/src/cli.ts op"
   },
   "dependencies": {
     "@grpc/grpc-js": "1.13.4",
