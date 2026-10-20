@@ -22,8 +22,8 @@
   <header class="top">
     <a class="mark" href="/">zecPOT</a>
     <nav class="top-links" aria-label="Page">
-      <a href="#yours">Your tickets</a>
       <a href="#how">How it works</a>
+      <a href="#yours">Your tickets</a>
     </nav>
   </header>
 
@@ -133,39 +133,6 @@
       </div>
     </section>
 
-    <section class="panel yours" id="yours" aria-labelledby="yours-h">
-      <h2 id="yours-h">Your tickets</h2>
-      <div id="device-out" aria-live="polite"></div>
-      <details class="other" id="other">
-        <summary>Bought on another device? Paste a ticket code</summary>
-        <form id="check-form" class="inline">
-          <input id="check-code" placeholder="spk1…" autocomplete="off" spellcheck="false" aria-label="Ticket code" />
-          <button type="submit">Check</button>
-        </form>
-        <p class="fine">The check runs in this browser. Your code never leaves it.</p>
-        <div id="check-out" aria-live="polite"></div>
-      </details>
-    </section>
-
-    <section class="panel treasury" aria-labelledby="tr-h">
-      <div class="tr-head">
-        <h2 id="tr-h">The weekly zkSNARK bonus</h2>
-        <p class="tr-sub">The 5% fee from each pot saves up and buys the cheapest zkSNARK on Zilkroad. Once a week, one goes to a random ticket from that week’s pots, on top of the daily prize.</p>
-      </div>
-      <div class="tr-grid">
-        <div>
-          <p class="tr-label" id="tr-label">Saving for the next zkSNARK</p>
-          <div class="bar" role="progressbar" id="tr-bar" aria-valuemin="0" aria-valuemax="100" aria-label="Treasury savings"><span id="tr-fill"></span></div>
-          <p class="tr-nums" id="tr-nums"></p>
-        </div>
-        <div>
-          <p class="tr-label">Up for grabs</p>
-          <p class="tr-snarks" id="tr-snarks">None yet</p>
-          <p class="tr-nums" id="tr-bonus"></p>
-        </div>
-      </div>
-    </section>
-
     <section class="panel how" id="how" aria-labelledby="how-h">
       <h2 id="how-h">How it works</h2>
       <ol class="how-steps">
@@ -198,6 +165,39 @@
           <button type="button" id="copy-tr-key">Copy</button>
         </div>
       </details>
+    </section>
+
+    <section class="panel yours" id="yours" aria-labelledby="yours-h">
+      <h2 id="yours-h">Your tickets</h2>
+      <div id="device-out" aria-live="polite"></div>
+      <details class="other" id="other">
+        <summary>Bought on another device? Paste a ticket code</summary>
+        <form id="check-form" class="inline">
+          <input id="check-code" placeholder="spk1…" autocomplete="off" spellcheck="false" aria-label="Ticket code" />
+          <button type="submit">Check</button>
+        </form>
+        <p class="fine">The check runs in this browser. Your code never leaves it.</p>
+        <div id="check-out" aria-live="polite"></div>
+      </details>
+    </section>
+
+    <section class="panel treasury" aria-labelledby="tr-h">
+      <div class="tr-head">
+        <h2 id="tr-h">The weekly zkSNARK bonus</h2>
+        <p class="tr-sub">The 5% fee from each pot saves up and buys the cheapest zkSNARK on Zilkroad. Once a week, one goes to a random ticket from that week’s pots, on top of the daily prize.</p>
+      </div>
+      <div class="tr-grid">
+        <div>
+          <p class="tr-label" id="tr-label">Saving for the next zkSNARK</p>
+          <div class="bar" role="progressbar" id="tr-bar" aria-valuemin="0" aria-valuemax="100" aria-label="Treasury savings"><span id="tr-fill"></span></div>
+          <p class="tr-nums" id="tr-nums"></p>
+        </div>
+        <div>
+          <p class="tr-label">Up for grabs</p>
+          <p class="tr-snarks" id="tr-snarks">None yet</p>
+          <p class="tr-nums" id="tr-bonus"></p>
+        </div>
+      </div>
     </section>
 
     <section class="panel past-panel" aria-labelledby="past-h">
