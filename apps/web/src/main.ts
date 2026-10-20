@@ -281,7 +281,7 @@ function renderOdds() {
   const rf = s.raffles.find((r) => r.status === "open");
   if (rf) {
     const mine = myRaffleEntries(rf);
-    row(`zkSNARK #${rf.snarkId} raffle chance`, `${mine + n} in ${rf.tickets + n} (${pct(mine + n, rf.tickets + n)})`);
+    row("Raffle chance", `${mine + n} in ${rf.tickets + n} (${pct(mine + n, rf.tickets + n)})`);
   }
 }
 
