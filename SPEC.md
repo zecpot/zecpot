@@ -4,7 +4,7 @@ A daily, private ZEC pot on Zcash.
 - **Tickets:** 0.01 ZEC each, as many as you like, bought with one shielded payment.
 - **Daily draw:** once a day, one ticket is drawn from a future block hash. It takes the whole pot minus a **5% fee**.
 - **Treasury:** the fee goes to a public treasury that **sweeps floor zkSNARKs** on Zilkroad.
-- **Weekly bonus:** every week, one of those zkSNARKs is drawn for a random ticket from that week's pots.
+- **zkSNARK raffles:** the operator raffles each zkSNARK the treasury buys. Every ticket bought while a raffle runs (48 hours by default) is entered, on top of the daily draw.
 
 Target: ZECATHON, Wildcard track. Deadline: 28 Oct 2026, 23:59 UTC. Version: v0.2 (20 Oct 2026). It was renamed from SNARKPOT, and the mechanics changed from "the pot buys one zkSNARK".
 
@@ -16,7 +16,7 @@ Target: ZECATHON, Wildcard track. Deadline: 28 Oct 2026, 23:59 UTC. Version: v0.
 - **No identities.** Nobody, including the operator, learns who bought a ticket or who won. There are no accounts, no cookies and no analytics.
 - **Verifiable.** Anyone can check every ticket, every draw, every fee, every payout and every sweep without trusting the operator.
 - **Simple to use.** One QR payment buys tickets. One signed claim collects a prize.
-- **Robust.** Prizes are paid in ZEC automatically. Zilkroad only matters for treasury sweeps and bonus delivery, and if its API fails, those become operator to-dos rather than errors.
+- **Robust.** Prizes are paid in ZEC automatically. Zilkroad only matters for treasury sweeps and raffle delivery, and if its API fails, those become operator to-dos rather than errors.
 
 **Non-goals (v1)**
 - **Trustless custody.** The operator's wallets hold funds between payment and payout. This is made auditable with published viewing keys (§5), not removed.
@@ -53,12 +53,18 @@ Target: ZECATHON, Wildcard track. Deadline: 28 Oct 2026, 23:59 UTC. Version: v0.
 5. **Only the address hash is published,** with the signature and the payout txid. Anyone can check the winner authorised that payout without learning where it went.
 6. **Unclaimed after 14 days** (`claimWindowBlocks`): the prize rolls into the open pot as carried money and is **not** charged the fee again.
 
-### 3.3 Weekly bonus (zkSNARK)
-1. **When:** on every pot whose number is divisible by 7 (`bonusEveryRounds`), if the treasury holds a zkSNARK it hasn't promised to anyone.
-2. **Who's in it:** every ticket of the drawn pots from `r−6` to `r` is eligible, concatenated in pot order.
-3. **The draw:** `winner = sha256("ZECPOT1|bonus|r|blockhash|listHash") mod N`. It uses the same seed block as pot r, under a different domain tag.
-4. **Claiming:** the winner signs `ZECPOT1|bonus|round=<r>|ticket=<i>|to=<hash(ZR-…)>|snark=<id>` with a Zilkroad account ID. The engine transfers the zkSNARK through the API, or creates a transfer task for the operator if the API fails.
-5. **Unclaimed after 14 days:** the zkSNARK goes back to the treasury for a later week.
+### 3.3 zkSNARK raffles
+1. **Ready:** when the treasury buys a zkSNARK (§4.5), the engine adds a `raffle` to-do for the operator. Nothing is raffled without the operator's say-so.
+2. **Open:** the operator runs `npm run op -- raffle <zkSNARK #> [hours]`. The default is 48 hours, and the length is chosen each time.
+   - The window is fixed at that moment: `openHeight` is the engine's scanned height and `closeHeight = openHeight + ceil(hours × 3600 / 75)`.
+   - Both heights are published in `/data/raffles/<n>.json` right away. Only one raffle runs at a time.
+3. **Who's in it:** every ticket whose payment is mined at a height in `(openHeight, closeHeight]`, across however many daily pots that spans.
+   - There's no separate raffle ticket. A ticket bought during the window is in its daily pot **and** in the raffle.
+   - The daily draws carry on as usual during and after the raffle.
+4. **The draw:** after `seedHeight = closeHeight + 10` and 10 more blocks, `winner = sha256("ZECPOT1|raffle|n|blockhash|listHash") mod N`. The list is sorted like a daily list, and its own domain tag keeps it independent of any daily draw.
+5. **Claiming:** the winner signs `ZECPOT1|raffle|raffle=<n>|ticket=<i>|to=<hash(ZR-…)>|snark=<id>` with a Zilkroad account ID. The engine transfers the zkSNARK through the API, or creates a transfer task for the operator if the API fails.
+6. **Nobody enters, or nobody claims within 14 days:** the zkSNARK goes back to the treasury, and a new `raffle` to-do appears.
+7. **The card:** when the raffle opens, the engine fetches the zkSNARK's name, traits and picture from Zilkroad (`/snarks/:id`, `/art/:id`) and serves the picture from `/data/art/`. Visitors never contact Zilkroad. Only PNG, JPEG, WebP and GIF are kept, never SVG.
 
 ### 3.4 No ZEC yet: swap stablecoins
 **Sources:** USDC on Solana, Arbitrum, Base or Ethereum, plus USDT on Ethereum. Availability is checked live.
@@ -93,10 +99,10 @@ Target: ZECATHON, Wildcard track. Deadline: 28 Oct 2026, 23:59 UTC. Version: v0.
 | `seedDelay` / `reorgSafety` | 10 / 10 | Seed block = close + 10. Draw once tip ≥ seed + 10 |
 | `feeBps` | 500 | 5% of new money in each drawn pot, to the treasury |
 | `minTickets` | 1 | Fewer → the pot rolls |
-| `claimWindowBlocks` | 16,128 | About 14 days, for prizes and bonuses |
+| `claimWindowBlocks` | 16,128 | About 14 days, for prizes and raffle zkSNARKs |
 | `feePerActionZats` | 5,000 | ZIP-317 marginal fee |
 | `sweepBufferBps` / `sweepReserveZats` | 500 / 200,000 | Treasury sweeps when it holds floor × 1.05 + 0.002 |
-| `bonusEveryRounds` | 7 | Weekly bonus |
+| `raffleDefaultHours` | 48 | Raffle length when the operator doesn't give one |
 
 ### 4.2 Tickets
 - **Memo:** `ZECPOT1 <pk>`, where `<pk>` is 43 base64url chars. The legacy tag `SNARKPOT1` is still accepted. Trailing NULs and whitespace are ignored.
@@ -149,8 +155,9 @@ The verifier recomputes the split from the published round file.
 - The inbox address (Orchard/Ironwood receiver only).
 - The **inbox UFVK**: every ticket payment (amount, memo, txid, never the sender), plus the inbox's sweeps to ops.
 - The **treasury UFVK**: every fee in, and every sweep payment out to Zilkroad.
-- **Round files** at `/data/rounds/<r>.json`: params, heights, ticket lines, listHash, seed hash, winner, split, fee txid, claim `{toHash, amountZats, sig, txid}`, and bonus `{snarkId, rounds, listHash, winner, claim}`.
-- **The verifier:** `npm run verify -- <r>`, also built into the site's "Verified" badge. It recomputes listHash, the winner, the split, the claim signature and the bonus draw.
+- **Round files** at `/data/rounds/<r>.json`: params, heights, ticket lines, listHash, seed hash, winner, split, fee txid, claim `{toHash, amountZats, sig, txid}`.
+- **Raffle files** at `/data/raffles/<n>.json`: zkSNARK, window heights, ticket lines, listHash, seed hash, winner and claim `{toHash, sig}`.
+- **The verifier:** `npm run verify -- <r>`, also built into the site's "Verified" badge. It recomputes listHash, the winner, the split and the claim signature. `npm run verify -- raffle <n>` does the same for a raffle.
 
 **Why three wallets:**
 - zingolib always sends with the outgoing viewing key enabled (`OvkPolicy::Sender`). A published UFVK therefore reveals where that wallet sent money.
@@ -165,7 +172,7 @@ The verifier recomputes the split from the published round file.
 | Links between purchases | Nobody, because each purchase uses a fresh key | Keys are never reused |
 | Ticket ↔ site visitor | Nobody | Static site, no logs, no cookies, no analytics, self-hosted font, client-side lookups |
 | Winner's payout address | Operator only | Shielded only. Published as a hash. UI recommends a fresh address |
-| Bonus winner's Zilkroad account | Operator, plus Zilkroad's transfer record | Published as a hash. UI recommends a fresh account |
+| Raffle winner's Zilkroad account | Operator, plus Zilkroad's transfer record | Published as a hash. UI recommends a fresh account |
 | Ticket amounts | Inbox UFVK holders see multiples of 0.01 | Fixed denomination |
 | Claim-time IP | Operator's HTTP endpoint (and Cloudflare, if tunnelled) | No request logging. Documented |
 | Operator ↔ lightwalletd | zec.rocks sees the operator's IP (direct build) | Operator-side only. Players' privacy is unaffected |
@@ -180,7 +187,8 @@ These are **unofficial** endpoints, the ones zilkroad.com's own front-end uses, 
 | `GET /market/stats` | `floorZec` |
 | `GET /market/tokens` | Listings: `listed`, `ask`, `listingId`, `buying`, `purged` |
 | `POST /market/orders` · `GET /market/orders/:id` | Buy (treasury sweeps) |
-| `POST /market/transfers` | `{snarkId, toAccountId}` (bonus delivery) |
+| `GET /snarks/:id` · `GET /art/:id` | Raffle card: name, traits, picture |
+| `POST /market/transfers` | `{snarkId, toAccountId}` (raffle delivery) |
 | `GET /me` | Session check |
 
 **Auth:** the session cookie (`cf_clearance=…; zr_session=…`) comes from a manual sign-in. Turnstile is never automated. Optional: `ZILKROAD_USER_AGENT`.
@@ -190,11 +198,11 @@ These are **unofficial** endpoints, the ones zilkroad.com's own front-end uses, 
 ## 8. Architecture
 
 ```
-packages/core   tickets, memos, ZIP-321, draw, bonus draw, pot split, claims, verifier
-apps/engine     engine.ts      state v2: pots, payouts queue, treasury sweeps, bonus, tasks
+packages/core   tickets, memos, ZIP-321, draw, raffle draw, pot split, claims, verifier
+apps/engine     engine.ts      state v2: pots, raffles, payouts queue, treasury sweeps, tasks
                 adapters/zingo ZingoPool (inbox+ops) · ZingoTreasury · LightwalletdChain (gRPC)
                 adapters/zilkroad-http · adapters/mock
-                server.ts      static site, /data, /api/claim, /api/bonus-claim, /api/withdraw, /api/operator (token)
+                server.ts      static site, /data, /api/claim, /api/raffle-claim, /api/withdraw, /api/operator (token, this machine only)
                 cli.ts         serve | simulate | tick | op | verify | blockhash
 apps/web        static site; swap/ (1Click, EIP-6963, Wallet Standard)
 tools           setup-pool.sh · write-env.sh · add-treasury.sh
@@ -233,7 +241,7 @@ tools           setup-pool.sh · write-env.sh · add-treasury.sh
 - **Custody.** Three hot wallets. Keep balances small, publish two viewing keys, and pay out promptly.
 - **Zilkroad API.** Unofficial. Every call has a manual fallback, and prizes don't depend on it.
 - **zingo-cli changes.** It's moving fast (Ironwood, mixnet). Pin the built commit. The adapters are tested against its real output.
-- **Low volume.** At 1 ZEC a day, the treasury sweeps a 0.384 ZEC floor about every 8 days. At low volume, the weekly bonus may skip weeks until the first sweep.
+- **Low volume.** At 1 ZEC a day, the treasury sweeps a 0.384 ZEC floor about every 8 days. Until the first sweep there's nothing to raffle.
 
 ## 11. Judging fit
 

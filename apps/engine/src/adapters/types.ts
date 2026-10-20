@@ -49,4 +49,12 @@ export interface ZilkroadAdapter {
   transfer(snarkId: number, toAccountId: string): Promise<void>;
   /** True if the operator session is valid and can trade/transfer. */
   sessionOk(): Promise<boolean>;
+  /** Name, traits and picture of one zkSNARK, for the raffle card. Public data. */
+  snarkInfo?(snarkId: number): Promise<SnarkInfo>;
+}
+
+export interface SnarkInfo {
+  name: string;
+  traits: { trait: string; value: string }[];
+  image?: { bytes: Uint8Array; type: string };
 }

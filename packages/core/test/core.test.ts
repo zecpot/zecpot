@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_PARAMS,
-  bonusWinnerIndex,
+  raffleWinnerIndex,
   destHash,
   keyFromCode,
   listHash,
@@ -11,15 +11,16 @@ import {
   parseTicketMemo,
   potSplit,
   roundTicketList,
-  signBonusClaim,
+  signRaffleClaim,
   signClaim,
   signWithdraw,
   sweepTargetZats,
   ticketLine,
   ticketMemo,
   ticketsFromPayment,
-  verifyBonus,
-  verifyBonusClaim,
+  verifyRaffle,
+  verifyRaffleClaim,
+  type RaffleRecord,
   verifyClaim,
   verifyRound,
   verifyWithdraw,
@@ -103,7 +104,7 @@ test("ticket order is canonical regardless of input order; carried first", () =>
   assert.equal(listHash(roundTicketList(carried, [...fresh].reverse())), listHash(roundTicketList(carried, fresh)));
 });
 
-test("daily and bonus draws are deterministic, roughly uniform, and independent", () => {
+test("daily and raffle draws are deterministic, roughly uniform, and independent", () => {
   const ts: Ticket[] = Array.from({ length: 10 }, (_, i) => ({ txid: `t${i}`, outIndex: 0, k: 0, pk: "p", height: 1 }));
   assert.equal(winnerIndex(1, HASH, ts), winnerIndex(1, HASH, ts));
   const counts = new Array(10).fill(0);
@@ -111,10 +112,10 @@ test("daily and bonus draws are deterministic, roughly uniform, and independent"
   for (let r = 0; r < 5000; r++) {
     const w = winnerIndex(r, HASH, ts);
     counts[w]++;
-    if (bonusWinnerIndex(r, HASH, ts) === w) same++;
+    if (raffleWinnerIndex(r, HASH, ts) === w) same++;
   }
   for (const c of counts) assert.ok(c > 400 && c < 600, `bucket ${c}`);
-  assert.ok(same > 350 && same < 650, `bonus should match the daily winner ~10% of the time, got ${same}`);
+  assert.ok(same > 350 && same < 650, `raffle should match the daily winner ~10% of the time, got ${same}`);
   assert.throws(() => winnerIndex(1, HASH.toUpperCase(), ts));
 });
 
@@ -129,13 +130,14 @@ test("prize claim binds round, ticket, hashed address and exact amount", () => {
   assert.throws(() => signClaim(k.code, 7, 3, "t1notshielded", 1));
 });
 
-test("bonus claim binds round, ticket, account and zkSNARK", () => {
+test("raffle claim binds raffle, ticket, account and zkSNARK", () => {
   const k = newTicketKey();
-  const sig = signBonusClaim(k.code, 7, 2, "ZR-7K4Q-M2XD", 2950);
-  assert.ok(verifyBonusClaim(k.pk, 7, 2, destHash("ZR-7K4Q-M2XD"), 2950, sig));
-  assert.ok(!verifyBonusClaim(k.pk, 7, 2, destHash("ZR-AAAA-BBBB"), 2950, sig));
-  assert.ok(!verifyBonusClaim(k.pk, 7, 2, destHash("ZR-7K4Q-M2XD"), 2951, sig));
-  assert.throws(() => signBonusClaim(k.code, 7, 2, "not-an-id", 2950));
+  const sig = signRaffleClaim(k.code, 7, 2, "ZR-7K4Q-M2XD", 2950);
+  assert.ok(verifyRaffleClaim(k.pk, 7, 2, destHash("ZR-7K4Q-M2XD"), 2950, sig));
+  assert.ok(!verifyRaffleClaim(k.pk, 7, 2, destHash("ZR-AAAA-BBBB"), 2950, sig));
+  assert.ok(!verifyRaffleClaim(k.pk, 7, 2, destHash("ZR-7K4Q-M2XD"), 2951, sig));
+  assert.ok(!verifyRaffleClaim(k.pk, 8, 2, destHash("ZR-7K4Q-M2XD"), 2950, sig), "other raffle");
+  assert.throws(() => signRaffleClaim(k.code, 7, 2, "not-an-id", 2950));
 });
 
 test("withdraw: fee, amount, signature binds round/amount/address", () => {
@@ -170,17 +172,19 @@ test("verifyRound checks the winner, the fee split and the claim; catches tamper
   assert.ok(!verifyRound({ ...claimed, claim: { ...claimed.claim!, amountZats: 1 } }).ok, "claim for a different amount");
 });
 
-test("verifyBonus recomputes the weekly winner over the named rounds", () => {
+test("verifyRaffle recomputes the list hash, winner and claim; catches tampering", () => {
   const k = newTicketKey();
-  const a = drawnRecord(k, 3);
-  const b = { ...drawnRecord(k, 5), round: 2, tickets: Array.from({ length: 5 }, (_, i) => `ty${i}:0:0:${k.pk}`) };
-  const lines = [...a.tickets, ...b.tickets];
-  const winner = bonusWinnerIndex(2, HASH, lines.map(parseLine));
-  const sig = signBonusClaim(k.code, 2, winner, "ZR-7K4Q-M2XD", 2950);
-  const withBonus: RoundRecord = {
-    ...b,
-    bonus: { snarkId: 2950, rounds: [1, 2], listHash: listHash(lines.map(parseLine)), ticketCount: 8, winner, status: "claimed", claim: { toHash: destHash("ZR-7K4Q-M2XD"), sig } },
+  const tickets = Array.from({ length: 8 }, (_, i) => `tr${i}:0:0:${k.pk}`);
+  const parsed = tickets.map(parseLine);
+  const winner = raffleWinnerIndex(3, HASH, parsed);
+  const sig = signRaffleClaim(k.code, 3, winner, "ZR-7K4Q-M2XD", 2950);
+  const r: RaffleRecord = {
+    raffle: 3, snarkId: 2950, status: "claimed", params: DEFAULT_PARAMS, openHeight: 0, closeHeight: 10, seedHeight: 20,
+    openedAt: "2026-10-20T00:00:00Z", tickets, listHash: listHash(parsed), seedBlockHash: HASH, winner,
+    claim: { toHash: destHash("ZR-7K4Q-M2XD"), sig },
   };
-  assert.ok(verifyBonus(withBonus, { 1: a.tickets, 2: b.tickets }).ok);
-  assert.ok(!verifyBonus({ ...withBonus, bonus: { ...withBonus.bonus!, winner: (winner + 1) % 8 } }, { 1: a.tickets, 2: b.tickets }).ok);
+  assert.ok(verifyRaffle(r).ok);
+  assert.ok(!verifyRaffle({ ...r, winner: (winner + 1) % 8 }).ok, "wrong winner");
+  assert.ok(!verifyRaffle({ ...r, tickets: tickets.slice(1) }).ok, "ticket removed");
+  assert.ok(!verifyRaffle({ ...r, snarkId: 2951 }).ok, "claim for another zkSNARK");
 });

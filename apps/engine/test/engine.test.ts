@@ -5,7 +5,7 @@ import {
   newTicketKey,
   parseLine,
   potSplit,
-  signBonusClaim,
+  signRaffleClaim,
   signClaim,
   ticketMemo,
   type Params,
@@ -13,7 +13,7 @@ import {
 import { MockChain, MockWallet, MockZilkroad } from "../src/adapters/mock.ts";
 import { Engine, initialState, migrateState } from "../src/engine.ts";
 
-const P: Params = { ...DEFAULT_PARAMS, roundBlocks: 20, seedDelay: 2, reorgSafety: 1, claimWindowBlocks: 50, bonusEveryRounds: 3 };
+const P: Params = { ...DEFAULT_PARAMS, roundBlocks: 20, seedDelay: 2, reorgSafety: 1, claimWindowBlocks: 50 };
 const TREASURY = "u1treasury";
 const ADDR = "u1" + "q".repeat(110);
 const ACCT = "ZR-7K4Q-M2XD";
@@ -154,64 +154,117 @@ test("if Zilkroad fails, the sweep becomes an operator task; completing it recor
   assert.equal(engine.state.sweeps[0]!.manual, true);
 });
 
-test("weekly bonus: every 3rd round draws a treasury zkSNARK over the week's tickets; winner claims to a Zilkroad account", async () => {
+function raffleWinner(engine: Engine, n: number, keys: { pk: string; code: string }[]) {
+  const rf = engine.raffle(n)!;
+  return keys.find((k) => k.pk === parseLine(rf.tickets[rf.winner!]!).pk)!;
+}
+
+test("a swept zkSNARK becomes a 'raffle' to-do; the operator opens it with a chosen length", async () => {
+  const { chain, treasury, engine } = setup([0.02]);
+  treasury.balanceZats = 3_000_000;
+  await engine.tick();
+  await engine.tick();
+  assert.deepEqual(engine.state.treasurySnarks, [2950]);
+  const todo = engine.openTasks().find((t) => t.kind === "raffle")!;
+  assert.ok(todo.detail.includes("npm run op -- raffle 2950"));
+  assert.equal((await engine.openRaffle(9999)).ok, false, "not in the treasury");
+  assert.equal((await engine.openRaffle(2950, { hours: 0 })).ok, false, "bad length");
+  const before = chain.tip;
+  const out = await engine.openRaffle(2950, { hours: 24 });
+  assert.equal(out.ok, true);
+  const rf = engine.raffle(1)!;
+  assert.equal(rf.closeHeight - rf.openHeight, 1152, "24 h at 75 s blocks");
+  assert.equal(rf.openHeight, before);
+  assert.deepEqual(engine.state.treasurySnarks, [], "promised to the raffle");
+  assert.equal(engine.openTasks().some((t) => t.kind === "raffle"), false, "to-do closed");
+  assert.equal(rf.snark?.name, "zkSNARKs #2950");
+  assert.ok(rf.snark?.image?.startsWith("/data/art/2950."));
+  assert.ok(engine.art.size === 1, "picture waiting to be published");
+  assert.equal((await engine.openRaffle(2950)).ok, false, "one raffle at a time");
+  // default length
+  engine.state.raffles = [];
+  (engine.state.treasurySnarks as number[]).push(2950);
+  await engine.openRaffle(2950);
+  assert.equal(engine.raffle(1)!.closeHeight - engine.raffle(1)!.openHeight, 2304, "48 h by default");
+});
+
+test("raffle: only tickets bought inside the window count, across daily pots; daily draws carry on", async () => {
   const { chain, market, engine } = setup();
   engine.state.treasurySnarks.push(2950);
   market.held.add(2950);
-  const keys: ReturnType<typeof newTicketKey>[] = [];
-  for (let n = 1; n <= 3; n++) {
-    keys.push(buy(chain, 2), buy(chain, 1));
-    await closeAndDraw(chain, engine);
-  }
-  const r3 = engine.round(3)!;
-  assert.ok(r3.bonus, "bonus drawn on round 3");
-  assert.deepEqual(r3.bonus!.rounds, [1, 2, 3]);
-  assert.equal(r3.bonus!.ticketCount, 9);
-  assert.deepEqual(engine.state.treasurySnarks, [], "promised to the bonus winner");
-  assert.equal(engine.round(2)!.bonus, undefined);
-
-  const lines = r3.bonus!.rounds.flatMap((n) => engine.round(n)!.tickets);
-  const pk = parseLine(lines[r3.bonus!.winner]!).pk;
-  const w = keys.find((k) => k.pk === pk)!;
-  assert.equal(engine.submitBonusClaim(3, r3.bonus!.winner, ACCT, signBonusClaim(w.code, 3, r3.bonus!.winner, ACCT, 2951)).ok, false, "wrong zkSNARK");
-  assert.equal(engine.submitBonusClaim(3, r3.bonus!.winner, ACCT, signBonusClaim(w.code, 3, r3.bonus!.winner, ACCT, 2950)).ok, true);
+  const early = buy(chain, 3);
+  await engine.tick(); // ingested before the raffle opens
+  await engine.openRaffle(2950, { blocks: 30 });
+  const rf = engine.raffle(1)!;
+  const keys = [buy(chain, 2), buy(chain, 1)];
+  await closeAndDraw(chain, engine); // pot 1 closes and draws as usual
+  assert.equal(engine.round(1)!.status, "drawn");
+  keys.push(buy(chain, 4)); // pot 2, still inside the raffle window
+  chain.mine(Math.max(0, rf.closeHeight - chain.tip));
   await engine.tick();
-  assert.equal(r3.bonus!.status, "delivered");
+  buy(chain, 5); // after the window: daily pot only
+  chain.mine(P.seedDelay + P.reorgSafety);
+  await engine.tick();
+  assert.equal(rf.status, "drawn");
+  assert.equal(rf.tickets.length, 7, "2 + 1 + 4 tickets, not the early 3 or the late 5");
+  assert.ok(!rf.tickets.some((l) => parseLine(l).pk === early.pk));
+  assert.equal(engine.openRound().round >= 2, true);
+
+  const w = raffleWinner(engine, 1, keys);
+  assert.equal(engine.submitRaffleClaim(1, rf.winner!, ACCT, signRaffleClaim(w.code, 1, rf.winner!, ACCT, 2951)).ok, false, "wrong zkSNARK");
+  assert.equal(engine.submitRaffleClaim(1, (rf.winner! + 1) % 7, ACCT, "x").ok, false, "wrong ticket");
+  assert.equal(engine.submitRaffleClaim(1, rf.winner!, ACCT, signRaffleClaim(w.code, 1, rf.winner!, ACCT, 2950)).ok, true);
+  await engine.tick();
+  assert.equal(rf.status, "delivered");
   assert.deepEqual(market.transfers, [{ snarkId: 2950, to: ACCT }]);
-  assert.ok(!JSON.stringify(engine.publicRound(r3)).includes(ACCT), "account ID is published only as a hash");
+  assert.ok(!JSON.stringify(engine.publicRaffle(rf)).includes(ACCT), "account ID is published only as a hash");
+  assert.ok(!("fresh" in engine.publicRaffle(rf)));
 });
 
-test("bonus delivery falls back to an operator transfer task; an unclaimed bonus goes back to the treasury", async () => {
+test("raffle delivery falls back to a transfer task; empty and unclaimed raffles return the zkSNARK", async () => {
   const { chain, market, engine } = setup();
   engine.state.treasurySnarks.push(2950, 2951);
-  const keys: ReturnType<typeof newTicketKey>[] = [];
-  for (let n = 1; n <= 3; n++) {
-    keys.push(buy(chain, 1));
-    await closeAndDraw(chain, engine);
-  }
-  const r3 = engine.round(3)!;
-  const lines = r3.bonus!.rounds.flatMap((n) => engine.round(n)!.tickets);
-  const w = keys.find((k) => k.pk === parseLine(lines[r3.bonus!.winner]!).pk)!;
+  await engine.openRaffle(2950, { blocks: 10 });
+  const k = buy(chain, 1);
+  chain.mine(10 + P.seedDelay + P.reorgSafety);
+  await engine.tick();
+  const rf = engine.raffle(1)!;
   market.failCalls = true;
-  engine.submitBonusClaim(3, r3.bonus!.winner, ACCT, signBonusClaim(w.code, 3, r3.bonus!.winner, ACCT, r3.bonus!.snarkId));
+  engine.submitRaffleClaim(1, rf.winner!, ACCT, signRaffleClaim(k.code, 1, rf.winner!, ACCT, 2950));
   await engine.tick();
   const t = engine.openTasks().find((x) => x.kind === "transfer")!;
-  assert.ok(t.detail.includes(ACCT));
+  assert.ok(t.detail.includes(ACCT) && t.raffle === 1);
   assert.equal(engine.completeTask(t.id, {}).ok, true);
-  assert.equal(r3.bonus!.status, "delivered");
-
-  // round 6's bonus is never claimed → returns to the treasury
+  assert.equal(rf.status, "delivered");
   market.failCalls = false;
-  for (let n = 4; n <= 6; n++) {
-    buy(chain, 1);
-    await closeAndDraw(chain, engine);
-  }
-  const r6 = engine.round(6)!;
-  assert.equal(r6.bonus!.snarkId, 2951);
+
+  // nobody buys during raffle 2 → empty, zkSNARK back, to-do again
+  await engine.openRaffle(2951, { blocks: 5 });
+  chain.mine(6);
+  await engine.tick();
+  assert.equal(engine.raffle(2)!.status, "empty");
+  assert.deepEqual(engine.state.treasurySnarks, [2951]);
+  assert.ok(engine.openTasks().some((x) => x.kind === "raffle" && x.snarkId === 2951));
+
+  // raffle 3 is drawn but never claimed → expired, back to the treasury
+  await engine.openRaffle(2951, { blocks: 5 });
+  buy(chain, 1);
+  chain.mine(5 + P.seedDelay + P.reorgSafety);
+  await engine.tick();
+  assert.equal(engine.raffle(3)!.status, "drawn");
   chain.mine(P.claimWindowBlocks + 5);
   await engine.tick();
-  assert.equal(r6.bonus!.status, "expired");
-  assert.ok(engine.state.treasurySnarks.includes(2951));
+  assert.equal(engine.raffle(3)!.status, "expired");
+  assert.deepEqual(engine.state.treasurySnarks, [2951]);
+});
+
+test("a saved state from before raffles existed loads with an empty raffle list", () => {
+  const { chain, treasury, market } = setup();
+  const s = initialState({ startHeight: 1000, poolAddress: "u1pool", viewingKey: "uview1in", treasuryAddress: TREASURY, treasuryViewingKey: "uview1tr", zilkroadAddress: "u1ops", params: P });
+  delete (s as Partial<typeof s>).raffles;
+  const e = new Engine(s, { wallet: chain, treasury, chain, market });
+  assert.deepEqual(e.state.raffles, []);
+  assert.deepEqual(e.publicState().raffles, []);
 });
 
 test("migrating the live SNARKPOT state re-reads the 0.1 ZEC payment as 10 tickets in round 1", async () => {

@@ -1,7 +1,8 @@
 /**
  * zecPOT engine (SPEC.md §3–4). One `tick()` does, in order:
- *   ingest payments → close/roll rounds → draw (+ weekly bonus) → expire
- *   → pay out (fees, prizes, withdrawals) → deliver bonus zkSNARKs → sweep floor
+ *   ingest payments (into today's pot and any open zkSNARK raffle) → close/roll
+ *   rounds → draw → expire → raffles: close, draw, expire, deliver
+ *   → pay out (fees, prizes, withdrawals) → sweep floor
  * All state is one JSON-serialisable object, so a crash between ticks loses
  * nothing. Zilkroad failures never block payouts: they become operator tasks.
  */
@@ -15,17 +16,18 @@ import {
   sweepTargetZats,
   ticketLine,
   ticketsFromPayment,
-  verifyBonusClaim,
+  verifyRaffleClaim,
   verifyClaim,
   verifyWithdraw,
   withdrawAmountZats,
   withdrawFeeZats,
   winnerIndex,
-  bonusWinnerIndex,
+  raffleWinnerIndex,
   ACCOUNT_ID_RE,
   PROTOCOL,
   SHIELDED_ADDR_RE,
   type Params,
+  type RaffleRecord,
   type RoundRecord,
   type Ticket,
 } from "../../../packages/core/src/index.ts";
@@ -35,8 +37,12 @@ export interface InternalRound extends RoundRecord {
   carried: Ticket[];
   fresh: Ticket[];
   donationsZats: number;
-  /** Private: the bonus winner's Zilkroad account ID, until delivered. */
-  bonusTo?: string;
+}
+
+export interface InternalRaffle extends RaffleRecord {
+  fresh: Ticket[];
+  /** Private: the winner's Zilkroad account ID, until delivered. */
+  to?: string;
 }
 
 export interface Payout {
@@ -54,11 +60,12 @@ export interface Payout {
 
 export interface Task {
   id: number;
-  kind: "buy" | "transfer" | "session";
+  kind: "buy" | "transfer" | "session" | "raffle";
   detail: string;
   status: "open" | "done";
   createdAt: string;
   round?: number;
+  raffle?: number;
   snarkId?: number;
   /** Private (a Zilkroad account ID) for transfer tasks. */
   to?: string;
@@ -92,7 +99,9 @@ export interface EngineState {
   };
   scannedHeight: number;
   rounds: InternalRound[];
-  /** zkSNARKs the treasury holds and has not promised to anyone. */
+  /** zkSNARK raffles the operator opened (added after v2 shipped, so older states lack it). */
+  raffles: InternalRaffle[];
+  /** zkSNARKs the treasury holds and has not put in a raffle yet. */
   treasurySnarks: number[];
   sweeps: Sweep[];
   pendingSweep?: { orderId: string; code: string; snarkId: number; listingId: number; priceZats: number; paymentTxid: string };
@@ -133,6 +142,7 @@ export function initialState(o: InitOpts): EngineState {
     treasury: { address: o.treasuryAddress, viewingKey: o.treasuryViewingKey, zilkroadAddress: o.zilkroadAddress, lastBalanceZats: null },
     scannedHeight: o.startHeight,
     rounds: [newRound(1, o.startHeight, params)],
+    raffles: [],
     treasurySnarks: [],
     sweeps: [],
     failedSweepListings: [],
@@ -182,12 +192,19 @@ function newRound(n: number, openHeight: number, params: Params, carry?: { feeBa
 }
 
 const MAX_SWEEP_ATTEMPTS = 5;
+const BLOCK_SECONDS = 75;
+const ART_TYPES: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif", "image/svg+xml": "svg" };
 
 export class Engine {
+  /** zkSNARK pictures fetched when a raffle opens, waiting to be written next to the public data. */
+  art = new Map<string, Uint8Array>();
+
   constructor(
     public state: EngineState,
     private deps: Deps,
-  ) {}
+  ) {
+    state.raffles ??= [];
+  }
 
   private get p() {
     return this.state.params;
@@ -208,7 +225,7 @@ export class Engine {
     return this.state.rounds.find((r) => r.round === n);
   }
   private addTask(t: Omit<Task, "id" | "status" | "createdAt">) {
-    const dup = this.state.tasks.find((x) => x.status === "open" && x.kind === t.kind && x.round === t.round && x.snarkId === t.snarkId);
+    const dup = this.state.tasks.find((x) => x.status === "open" && x.kind === t.kind && x.round === t.round && x.raffle === t.raffle && x.snarkId === t.snarkId);
     if (dup) return dup;
     const task: Task = { ...t, id: this.state.tasks.length + 1, status: "open", createdAt: this.now() };
     this.state.tasks.push(task);
@@ -244,12 +261,14 @@ export class Engine {
       if (r.status === "closed" && tip >= r.seedHeight + this.p.reorgSafety) await guard("draw", () => this.draw(r));
       const expired = tip > r.seedHeight + this.p.claimWindowBlocks;
       if (r.status === "drawn" && expired) this.expirePrize(r);
-      if (r.bonus?.status === "drawn" && expired) {
-        r.bonus.status = "expired";
-        this.state.treasurySnarks.push(r.bonus.snarkId);
-        this.log(`round ${r.round}: bonus zkSNARK #${r.bonus.snarkId} unclaimed, back to the treasury`);
+    }
+
+    for (const rf of this.state.raffles) {
+      try {
+        await this.raffleStep(rf, tip);
+      } catch (e) {
+        this.log(`raffle ${rf.raffle}: ${(e as Error).message}`);
       }
-      if (r.bonus?.status === "claimed") await guard("bonus delivery", () => this.deliverBonus(r));
     }
 
     await this.payOut();
@@ -275,6 +294,12 @@ export class Engine {
         this.log(`round ${open.round}: ${pay.zats} zats with no valid ticket memo → pot`);
       }
       open.fresh.push(...ts);
+      for (const rf of this.state.raffles) {
+        if (rf.status === "open" && pay.height > rf.openHeight && pay.height <= rf.closeHeight && ts.length) {
+          rf.fresh.push(...ts);
+          rf.tickets = roundTicketList([], rf.fresh).map(ticketLine);
+        }
+      }
     }
     this.state.scannedHeight = upTo;
     this.refreshList(open);
@@ -314,20 +339,6 @@ export class Engine {
     if (r.split.feeZats > 0) {
       this.queue({ kind: "fee", round: r.round, to: this.state.treasury.address, amountZats: r.split.feeZats, memo: `${PROTOCOL} fee round ${r.round}` });
     }
-    if (r.round % this.p.bonusEveryRounds === 0 && this.state.treasurySnarks.length > 0) this.drawBonus(r);
-  }
-
-  /** Weekly bonus: one treasury zkSNARK, drawn over every ticket in this round and the previous six. */
-  private drawBonus(r: InternalRound) {
-    const from = r.round - this.p.bonusEveryRounds + 1;
-    const rounds = this.state.rounds.filter((x) => x.round >= from && x.round <= r.round && x.winner !== undefined && x.tickets.length > 0);
-    const lines = rounds.flatMap((x) => x.tickets);
-    if (lines.length === 0) return;
-    const tickets = lines.map(parseLine);
-    const winner = bonusWinnerIndex(r.round, r.seedBlockHash!, tickets);
-    const snarkId = this.state.treasurySnarks.shift()!;
-    r.bonus = { snarkId, rounds: rounds.map((x) => x.round), listHash: listHash(tickets), ticketCount: tickets.length, winner, status: "drawn" };
-    this.log(`round ${r.round}: weekly bonus zkSNARK #${snarkId} goes to ticket ${winner} of ${tickets.length}`);
   }
 
   private expirePrize(r: InternalRound) {
@@ -359,46 +370,134 @@ export class Engine {
     return { ok: true, amountZats: amount };
   }
 
-  /** The weekly bonus winner claims the zkSNARK to a Zilkroad account ID. */
-  submitBonusClaim(round: number, ticket: number, accountId: string, sig: string): { ok: boolean; error?: string } {
-    const r = this.round(round);
-    const b = r?.bonus;
-    if (!r || !b) return { ok: false, error: "no bonus draw in that round" };
-    if (b.status !== "drawn") return { ok: false, error: b.status === "expired" ? "claim window has closed" : "already claimed" };
-    if (ticket !== b.winner) return { ok: false, error: "that ticket did not win the bonus" };
+  /* ---------------- zkSNARK raffles ---------------- */
+
+  /**
+   * Operator: put a treasury zkSNARK up for a raffle. Every ticket bought from now
+   * until the window ends is entered (default 48 h). The window is fixed once opened.
+   */
+  async openRaffle(snarkId: number, o: { hours?: number; blocks?: number } = {}): Promise<{ ok: boolean; error?: string; raffle?: number; closeHeight?: number }> {
+    const busy = this.state.raffles.find((r) => r.status === "open");
+    if (busy) return { ok: false, error: `raffle ${busy.raffle} (zkSNARK #${busy.snarkId}) is still open until block ${busy.closeHeight}` };
+    const i = this.state.treasurySnarks.indexOf(snarkId);
+    if (i < 0) return { ok: false, error: `the treasury doesn't hold zkSNARK #${snarkId} (it holds ${this.state.treasurySnarks.map((x) => "#" + x).join(", ") || "none"})` };
+    const hours = o.hours ?? this.p.raffleDefaultHours ?? 48;
+    if (o.blocks === undefined && !(hours > 0 && hours <= 24 * 14)) return { ok: false, error: "choose between 1 and 336 hours" };
+    const blocks = o.blocks ?? Math.ceil((hours * 3600) / BLOCK_SECONDS);
+    const openHeight = this.state.scannedHeight;
+    const closeHeight = openHeight + blocks;
+    const rf: InternalRaffle = {
+      raffle: this.state.raffles.length + 1,
+      snarkId,
+      status: "open",
+      params: this.p,
+      openHeight,
+      closeHeight,
+      seedHeight: closeHeight + this.p.seedDelay,
+      openedAt: this.now(),
+      tickets: [],
+      fresh: [],
+    };
+    this.state.treasurySnarks.splice(i, 1);
+    this.state.raffles.push(rf);
+    for (const t of this.state.tasks) {
+      if (t.status === "open" && t.kind === "raffle" && t.snarkId === snarkId) Object.assign(t, { status: "done", doneAt: this.now() });
+    }
+    try {
+      const info = await this.deps.market.snarkInfo?.(snarkId);
+      if (info) {
+        rf.snark = { name: info.name, traits: info.traits };
+        const ext = info.image && ART_TYPES[info.image.type];
+        if (info.image && ext) {
+          const file = `${snarkId}.${ext}`;
+          this.art.set(file, info.image.bytes);
+          rf.snark.image = `/data/art/${file}`;
+        }
+      }
+    } catch (e) {
+      this.log(`raffle ${rf.raffle}: couldn't fetch zkSNARK #${snarkId} details: ${(e as Error).message}`);
+    }
+    this.log(`raffle ${rf.raffle}: zkSNARK #${snarkId} open for tickets bought after block ${openHeight} up to ${closeHeight}`);
+    return { ok: true, raffle: rf.raffle, closeHeight };
+  }
+
+  raffle(n: number) {
+    return this.state.raffles.find((r) => r.raffle === n);
+  }
+
+  private readyToRaffle(snarkId: number) {
+    this.addTask({ kind: "raffle", snarkId, detail: `zkSNARK #${snarkId} is in the treasury. Open its raffle: npm run op -- raffle ${snarkId} [hours, default ${this.p.raffleDefaultHours ?? 48}]` });
+  }
+
+  private backToTreasury(rf: InternalRaffle, why: string) {
+    this.state.treasurySnarks.push(rf.snarkId);
+    this.log(`raffle ${rf.raffle}: ${why}; zkSNARK #${rf.snarkId} is back in the treasury`);
+    this.readyToRaffle(rf.snarkId);
+  }
+
+  private async raffleStep(rf: InternalRaffle, tip: number) {
+    if (rf.status === "open" && this.state.scannedHeight >= rf.closeHeight) {
+      const list = roundTicketList([], rf.fresh);
+      rf.tickets = list.map(ticketLine);
+      rf.listHash = listHash(list);
+      if (list.length === 0) {
+        rf.status = "empty";
+        this.backToTreasury(rf, "closed with no tickets");
+      } else {
+        rf.status = "closed";
+        this.log(`raffle ${rf.raffle}: closed with ${list.length} tickets; draw at block ${rf.seedHeight}`);
+      }
+    }
+    if (rf.status === "closed" && tip >= rf.seedHeight + this.p.reorgSafety) {
+      rf.seedBlockHash = await this.deps.chain.blockHash(rf.seedHeight);
+      rf.winner = raffleWinnerIndex(rf.raffle, rf.seedBlockHash, rf.tickets.map(parseLine));
+      rf.status = "drawn";
+      this.log(`raffle ${rf.raffle}: zkSNARK #${rf.snarkId} goes to ticket ${rf.winner} of ${rf.tickets.length}`);
+    }
+    if (rf.status === "drawn" && tip > rf.seedHeight + this.p.claimWindowBlocks) {
+      rf.status = "expired";
+      this.backToTreasury(rf, "unclaimed after the claim window");
+    }
+    if (rf.status === "claimed") await this.deliverRaffle(rf);
+  }
+
+  /** The raffle winner claims the zkSNARK to a Zilkroad account ID. */
+  submitRaffleClaim(raffle: number, ticket: number, accountId: string, sig: string): { ok: boolean; error?: string } {
+    const rf = this.raffle(raffle);
+    if (!rf || rf.winner === undefined) return { ok: false, error: "no draw for that raffle yet" };
+    if (rf.status !== "drawn") return { ok: false, error: rf.status === "expired" ? "claim window has closed" : "already claimed" };
+    if (ticket !== rf.winner) return { ok: false, error: "that ticket did not win the raffle" };
     if (!ACCOUNT_ID_RE.test(accountId)) return { ok: false, error: "account ID looks like ZR-7K4Q-M2XD" };
-    const lines = b.rounds.flatMap((n) => this.round(n)?.tickets ?? []);
-    const pk = parseLine(lines[ticket]!).pk;
-    if (!verifyBonusClaim(pk, round, ticket, destHash(accountId), b.snarkId, sig)) return { ok: false, error: "signature does not match the bonus ticket" };
-    b.status = "claimed";
-    b.claim = { toHash: destHash(accountId), sig };
-    r.bonusTo = accountId;
-    this.log(`round ${round}: bonus zkSNARK #${b.snarkId} claimed`);
+    const pk = parseLine(rf.tickets[ticket]!).pk;
+    if (!verifyRaffleClaim(pk, raffle, ticket, destHash(accountId), rf.snarkId, sig)) return { ok: false, error: "signature does not match the winning ticket" };
+    rf.status = "claimed";
+    rf.claim = { toHash: destHash(accountId), sig };
+    rf.to = accountId;
+    this.log(`raffle ${raffle}: zkSNARK #${rf.snarkId} claimed`);
     return { ok: true };
   }
 
-  private async deliverBonus(r: InternalRound) {
-    const b = r.bonus!;
-    if (this.state.tasks.some((t) => t.status === "open" && t.kind === "transfer" && t.round === r.round)) return;
+  private async deliverRaffle(rf: InternalRaffle) {
+    if (this.state.tasks.some((t) => t.status === "open" && t.kind === "transfer" && t.raffle === rf.raffle)) return;
     try {
-      await this.deps.market.transfer(b.snarkId, r.bonusTo!);
-      this.markBonusDelivered(r);
+      await this.deps.market.transfer(rf.snarkId, rf.to!);
+      this.markRaffleDelivered(rf);
     } catch (e) {
       this.addTask({
         kind: "transfer",
-        round: r.round,
-        snarkId: b.snarkId,
-        to: r.bonusTo,
-        detail: `Transfer zkSNARK #${b.snarkId} to ${r.bonusTo} on zilkroad.com (bonus, round ${r.round}). API said: ${(e as Error).message}`,
+        raffle: rf.raffle,
+        snarkId: rf.snarkId,
+        to: rf.to,
+        detail: `Transfer zkSNARK #${rf.snarkId} to ${rf.to} on zilkroad.com (raffle ${rf.raffle}). API said: ${(e as Error).message}`,
       });
     }
   }
 
-  private markBonusDelivered(r: InternalRound) {
-    r.bonus!.status = "delivered";
-    r.bonus!.claim!.deliveredAt = this.now();
-    r.bonusTo = undefined;
-    this.log(`round ${r.round}: bonus zkSNARK #${r.bonus!.snarkId} delivered`);
+  private markRaffleDelivered(rf: InternalRaffle) {
+    rf.status = "delivered";
+    rf.claim!.deliveredAt = this.now();
+    rf.to = undefined;
+    this.log(`raffle ${rf.raffle}: zkSNARK #${rf.snarkId} delivered`);
   }
 
   /** Withdraw tickets carried in from a round that rolled (SPEC §4.7). */
@@ -469,6 +568,7 @@ export class Engine {
         this.state.sweeps.push({ snarkId: ps.snarkId, priceZats: ps.priceZats, txid: ps.paymentTxid, orderId: ps.orderId, manual: false, at: this.now() });
         this.state.failedSweepListings = [];
         this.log(`treasury swept zkSNARK #${ps.snarkId} for ${ps.priceZats} zats`);
+        this.readyToRaffle(ps.snarkId);
         return;
       }
       this.state.failedSweepListings.push(ps.listingId);
@@ -515,20 +615,27 @@ export class Engine {
       this.state.sweeps.push({ snarkId: info.snarkId, priceZats: info.priceZats ?? 0, txid: info.txid, manual: true, at: this.now() });
       this.state.failedSweepListings = [];
     }
-    if (t.kind === "transfer") {
-      const r = this.round(t.round!);
-      if (r?.bonus?.status === "claimed") this.markBonusDelivered(r);
+    if (t.kind === "transfer" && t.raffle !== undefined) {
+      const rf = this.raffle(t.raffle);
+      if (rf?.status === "claimed") this.markRaffleDelivered(rf);
     }
+    // a raffle task can simply be dismissed; the zkSNARK stays in the treasury
     t.status = "done";
     t.doneAt = this.now();
     this.log(`operator task ${id} done`);
+    if (t.kind === "buy") this.readyToRaffle(info.snarkId!);
     return { ok: true };
   }
 
   /* ---------------- public data ---------------- */
 
   publicRound(r: InternalRound): RoundRecord & { donationsZats: number } {
-    const { carried, fresh, bonusTo, ...pub } = r;
+    const { carried, fresh, ...pub } = r;
+    return pub;
+  }
+
+  publicRaffle(r: InternalRaffle): RaffleRecord {
+    const { fresh, to, ...pub } = r;
     return pub;
   }
 
@@ -536,7 +643,6 @@ export class Engine {
     const open = this.openRound();
     const floor = this.state.lastFloorZats;
     const preview = potSplit(open.feeBaseZats, open.carriedZats, open.paymentNotes, this.p);
-    const nextBonus = Math.ceil(open.round / this.p.bonusEveryRounds) * this.p.bonusEveryRounds;
     return {
       protocol: PROTOCOL,
       params: this.p,
@@ -561,7 +667,6 @@ export class Engine {
         sweepTargetZats: floor && Number.isFinite(floor) ? sweepTargetZats(floor, this.p) : null,
         snarks: this.state.treasurySnarks,
         sweeps: this.state.sweeps.map(({ snarkId, priceZats, txid, manual, at }) => ({ snarkId, priceZats, txid, manual, at })),
-        nextBonusRound: nextBonus,
       },
       rounds: this.state.rounds.map((r) => ({
         round: r.round,
@@ -570,7 +675,16 @@ export class Engine {
         potZats: r.potZats,
         winner: r.winner ?? null,
         prizeZats: r.split?.prizeZats ?? null,
-        bonus: r.bonus ? { snarkId: r.bonus.snarkId, status: r.bonus.status, winner: r.bonus.winner, ticketCount: r.bonus.ticketCount } : null,
+      })),
+      raffles: this.state.raffles.map((r) => ({
+        raffle: r.raffle,
+        snarkId: r.snarkId,
+        status: r.status,
+        openHeight: r.openHeight,
+        closeHeight: r.closeHeight,
+        tickets: r.tickets.length,
+        winner: r.winner ?? null,
+        snark: r.snark ?? null,
       })),
     };
   }

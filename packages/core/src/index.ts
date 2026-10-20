@@ -4,7 +4,8 @@
  *
  * zecPOT: 0.01 ZEC tickets, one draw a day, the winning ticket takes the pot
  * minus a 5% fee; the fee goes to a public treasury that sweeps floor
- * zkSNARKs, and those zkSNARKs are given away in a weekly bonus draw.
+ * zkSNARKs, and the operator raffles each one: every ticket bought during
+ * the raffle window (48 h by default) is also entered in it.
  */
 import { ed25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha2";
@@ -32,8 +33,8 @@ export interface Params {
   /** Treasury sweeps when it holds floor × (1 + sweepBufferBps) + sweepReserveZats. */
   sweepBufferBps: number;
   sweepReserveZats: number;
-  /** A bonus zkSNARK draw runs on every round number divisible by this, if the treasury holds one. */
-  bonusEveryRounds: number;
+  /** Default zkSNARK raffle length when the operator opens one. */
+  raffleDefaultHours: number;
 }
 
 export const DEFAULT_PARAMS: Params = {
@@ -47,7 +48,7 @@ export const DEFAULT_PARAMS: Params = {
   feePerActionZats: 5_000,
   sweepBufferBps: 500,
   sweepReserveZats: 200_000,
-  bonusEveryRounds: 7,
+  raffleDefaultHours: 48,
 };
 
 /* ---------------- encoding helpers ---------------- */
@@ -237,11 +238,11 @@ export function winnerIndex(round: number, blockHashHex: string, tickets: Ticket
   return Number(BigInt("0x" + seed) % BigInt(tickets.length));
 }
 
-/** The weekly bonus uses a separate domain tag so it never mirrors the daily draw. */
-export function bonusWinnerIndex(round: number, blockHashHex: string, tickets: Ticket[]): number {
+/** zkSNARK raffles use their own domain tag, so a raffle never mirrors a daily draw. */
+export function raffleWinnerIndex(raffle: number, blockHashHex: string, tickets: Ticket[]): number {
   if (tickets.length === 0) throw new Error("no tickets");
   requireHash(blockHashHex);
-  const seed = sha256Hex(`${PROTOCOL}|bonus|${round}|${blockHashHex}|${listHash(tickets)}`);
+  const seed = sha256Hex(`${PROTOCOL}|raffle|${raffle}|${blockHashHex}|${listHash(tickets)}`);
   return Number(BigInt("0x" + seed) % BigInt(tickets.length));
 }
 
@@ -276,18 +277,18 @@ export function verifyClaim(pk: string, round: number, ticket: number, toHash: s
   }
 }
 
-export function bonusClaimMessage(round: number, ticket: number, accountHash: string, snarkId: number): string {
-  return `${PROTOCOL}|bonus|round=${round}|ticket=${ticket}|to=${accountHash}|snark=${snarkId}`;
+export function raffleClaimMessage(raffle: number, ticket: number, accountHash: string, snarkId: number): string {
+  return `${PROTOCOL}|raffle|raffle=${raffle}|ticket=${ticket}|to=${accountHash}|snark=${snarkId}`;
 }
 
-export function signBonusClaim(code: string, round: number, ticket: number, accountId: string, snarkId: number): string {
+export function signRaffleClaim(code: string, raffle: number, ticket: number, accountId: string, snarkId: number): string {
   if (!ACCOUNT_ID_RE.test(accountId)) throw new Error("account ID looks like ZR-7K4Q-M2XD");
-  return b64url(ed25519.sign(utf8ToBytes(bonusClaimMessage(round, ticket, destHash(accountId), snarkId)), secretOf(code)));
+  return b64url(ed25519.sign(utf8ToBytes(raffleClaimMessage(raffle, ticket, destHash(accountId), snarkId)), secretOf(code)));
 }
 
-export function verifyBonusClaim(pk: string, round: number, ticket: number, accountHash: string, snarkId: number, sig: string): boolean {
+export function verifyRaffleClaim(pk: string, raffle: number, ticket: number, accountHash: string, snarkId: number, sig: string): boolean {
   try {
-    return ed25519.verify(fromB64url(sig), utf8ToBytes(bonusClaimMessage(round, ticket, accountHash, snarkId)), fromB64url(pk));
+    return ed25519.verify(fromB64url(sig), utf8ToBytes(raffleClaimMessage(raffle, ticket, accountHash, snarkId)), fromB64url(pk));
   } catch {
     return false;
   }
@@ -331,15 +332,27 @@ export function verifyWithdraw(pk: string, round: number, tickets: number, amoun
  */
 export type RoundStatus = "open" | "closed" | "rolled" | "drawn" | "claimed" | "paid" | "expired";
 
-export interface BonusRecord {
+/**
+ * A zkSNARK raffle the operator opened. Every ticket bought at a height in
+ * (openHeight, closeHeight] is entered, in the same order as a daily list.
+ * open → closed → drawn → claimed → delivered;  closed with no tickets → empty;
+ * drawn and unclaimed → expired. Empty and expired zkSNARKs go back to the treasury.
+ */
+export interface RaffleRecord {
+  raffle: number;
   snarkId: number;
-  /** The drawn rounds whose tickets were eligible, in order. */
-  rounds: number[];
-  listHash: string;
-  ticketCount: number;
-  /** Index into the concatenated ticket lists of `rounds`. */
-  winner: number;
-  status: "drawn" | "claimed" | "delivered" | "expired";
+  status: "open" | "closed" | "drawn" | "claimed" | "delivered" | "expired" | "empty";
+  params: Params;
+  openHeight: number;
+  closeHeight: number;
+  seedHeight: number;
+  openedAt: string;
+  /** What the page shows: name, traits and a locally cached picture. */
+  snark?: { name: string; traits: { trait: string; value: string }[]; image?: string };
+  tickets: string[];
+  listHash?: string;
+  seedBlockHash?: string;
+  winner?: number;
   claim?: { toHash: string; sig: string; deliveredAt?: string };
 }
 
@@ -364,7 +377,6 @@ export interface RoundRecord {
   split?: PotSplit;
   feeTxid?: string;
   claim?: { toHash: string; amountZats: number; sig: string; txid?: string; paidAt?: string };
-  bonus?: BonusRecord;
 }
 
 export interface VerifyResult {
@@ -398,22 +410,21 @@ export function verifyRound(r: RoundRecord): VerifyResult {
   return { ok: checks.every((c) => c.ok), checks };
 }
 
-/** Checks a weekly bonus draw, given the ticket lists of the rounds it names. */
-export function verifyBonus(r: RoundRecord, ticketsByRound: Record<number, string[]>): VerifyResult {
+/** Re-derives a raffle's ticket list hash, winner and claim signature from its published file. */
+export function verifyRaffle(r: RaffleRecord): VerifyResult {
   const checks: VerifyResult["checks"] = [];
-  const b = r.bonus;
-  if (!b || !r.seedBlockHash) return { ok: true, checks };
-  const lines = b.rounds.flatMap((n) => ticketsByRound[n] ?? []);
-  const tickets = lines.map(parseLine);
-  checks.push({ name: "bonus listHash", ok: listHash(tickets) === b.listHash, detail: `${tickets.length} tickets` });
-  const w = bonusWinnerIndex(r.round, r.seedBlockHash, tickets);
-  checks.push({ name: "bonus winner", ok: w === b.winner, detail: `computed ${w}, published ${b.winner}` });
-  if (b.claim) {
-    const pk = tickets[b.winner]?.pk ?? "";
+  const tickets = r.tickets.map(parseLine);
+  if (r.listHash) checks.push({ name: "raffle listHash", ok: listHash(tickets) === r.listHash, detail: `${tickets.length} tickets` });
+  if (r.seedBlockHash && r.winner !== undefined) {
+    const w = raffleWinnerIndex(r.raffle, r.seedBlockHash, tickets);
+    checks.push({ name: "raffle winner", ok: w === r.winner, detail: `computed ${w}, published ${r.winner}` });
+  }
+  if (r.claim && r.winner !== undefined) {
+    const pk = tickets[r.winner]?.pk ?? "";
     checks.push({
-      name: "bonus claim signature",
-      ok: verifyBonusClaim(pk, r.round, b.winner, b.claim.toHash, b.snarkId, b.claim.sig),
-      detail: `zkSNARK #${b.snarkId}`,
+      name: "raffle claim signature",
+      ok: verifyRaffleClaim(pk, r.raffle, r.winner, r.claim.toHash, r.snarkId, r.claim.sig),
+      detail: `zkSNARK #${r.snarkId}`,
     });
   }
   return { ok: checks.every((c) => c.ok), checks };

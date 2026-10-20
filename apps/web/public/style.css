@@ -162,6 +162,29 @@ input {
 .win > p { color: var(--text); }
 .win + .win { margin-top: 14px; }
 
+/* ---------- zkSNARK raffle ---------- */
+.raffle {
+  display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 28px; align-items: center;
+  border: 2px solid var(--gold); border-radius: var(--radius-lg); padding: 24px; margin: 0 0 40px;
+  background: var(--surface);
+}
+.raffle-art img, .raffle-ph { width: 220px; height: 220px; border-radius: 14px; display: block; image-rendering: pixelated; background: var(--bg); object-fit: cover; }
+.raffle-ph { display: grid; place-items: center; color: var(--gold); font-size: 2.4rem; font-weight: 800; letter-spacing: -0.04em; }
+.raffle-art img:not([hidden]) + .raffle-ph { display: none; }
+.raffle-kicker { color: var(--gold); font-weight: 650; margin: 0 0 4px; }
+.raffle h2 { font-size: var(--step-3); font-weight: 780; letter-spacing: -0.02em; margin: 0 0 12px; }
+.traits { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 0 0 14px; padding: 0; }
+.traits li { border: 1px solid var(--line); border-radius: 999px; padding: 2px 11px; font-size: var(--step--1); color: var(--muted); }
+.traits li b { color: var(--text); font-weight: 600; }
+.raffle-sub { margin: 0 0 14px; }
+.raffle-sub strong { color: var(--gold); }
+.raffle-clock { display: grid; gap: 2px; }
+.raffle-clock .clock-time { font-size: var(--step-2); }
+.raffle-proof { color: var(--muted); font-size: var(--step--1); margin: 12px 0 0; }
+.raffle-proof .verified { color: var(--ok); font-weight: 650; }
+.raffle-past:not(:empty) { margin-top: 22px; border-top: 1px solid var(--line); }
+.raffle-past li { grid-template-columns: 5.5em 1fr auto; }
+
 /* ---------- latest draw ---------- */
 .latest { padding: 8px 0 40px; }
 .latest h2 { font-size: var(--step-1); color: var(--muted); font-weight: 600; }
@@ -319,6 +342,8 @@ button.mock { border-style: dashed; }
   .qr { width: 190px; height: 190px; }
   .slot { width: 34px; }
   .latest-row { grid-template-columns: 1fr; gap: 14px; }
+  .raffle { grid-template-columns: 1fr; gap: 18px; padding: 18px; }
+  .raffle-art img, .raffle-ph { width: 100%; height: auto; aspect-ratio: 1; max-width: 320px; }
   .latest-num { justify-self: start; }
   .top-links { gap: 16px; }
   .past li { grid-template-columns: 4em 1fr; }

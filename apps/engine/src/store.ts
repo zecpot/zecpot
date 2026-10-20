@@ -28,4 +28,12 @@ export async function publish(dataDir: string, engine: Engine) {
   for (const r of engine.state.rounds) {
     await atomicWrite(join(dataDir, "rounds", `${r.round}.json`), JSON.stringify(engine.publicRound(r), null, 2));
   }
+  for (const r of engine.state.raffles) {
+    await atomicWrite(join(dataDir, "raffles", `${r.raffle}.json`), JSON.stringify(engine.publicRaffle(r), null, 2));
+  }
+  for (const [file, bytes] of engine.art) {
+    await mkdir(join(dataDir, "art"), { recursive: true });
+    await writeFile(join(dataDir, "art", file), bytes);
+    engine.art.delete(file);
+  }
 }

@@ -82,6 +82,22 @@
       </div>
     </section>
 
+    <!-- Shown while a zkSNARK raffle is running, and with its result afterwards -->
+    <section class="raffle" id="raffle" hidden aria-labelledby="raffle-h">
+      <div class="raffle-art"><img id="raffle-img" alt="" width="220" height="220" hidden /><span class="raffle-ph" id="raffle-ph" aria-hidden="true"></span></div>
+      <div class="raffle-body">
+        <p class="raffle-kicker" id="raffle-kicker">zkSNARK raffle</p>
+        <h2 id="raffle-h">Win a zkSNARK</h2>
+        <ul class="traits" id="raffle-traits" aria-label="Traits"></ul>
+        <p class="raffle-sub" id="raffle-sub"></p>
+        <div class="raffle-clock" id="raffle-clock-box">
+          <span class="clock-label" id="raffle-clock-label">Raffle closes in</span>
+          <span class="clock-time" id="raffle-clock">–</span>
+        </div>
+        <p class="raffle-proof" id="raffle-proof"></p>
+      </div>
+    </section>
+
     <section class="panel" id="buy-panel" hidden aria-labelledby="buy-h">
       <h2 id="buy-h">Two steps to get your tickets</h2>
       <ol class="steps">
@@ -161,6 +177,8 @@
           <dd>The ticket list locks at the closing block. The winner comes from the hash of a block mined after that. This page re-checks every past draw itself, and anyone can run the same check with <code>npm run verify</code>.</dd>
           <dt>Anyone can audit the money</dt>
           <dd>The viewing keys for the pot and the treasury are public. Load them into a view-only wallet to see every ticket, fee and zkSNARK purchase.</dd>
+          <dt>Raffles are drawn the same way</dt>
+          <dd>When a raffle opens, its start and end blocks are fixed and published. Its ticket list locks at the end block, and a later block hash picks the winner.</dd>
           <dt>Winners stay private</dt>
           <dd>Only a hash of the payout address is published. Unclaimed prizes roll into a later pot after 14 days.</dd>
         </dl>
@@ -193,8 +211,8 @@
 
     <section class="panel treasury" aria-labelledby="tr-h">
       <div class="tr-head">
-        <h2 id="tr-h">The weekly zkSNARK bonus</h2>
-        <p class="tr-sub">The 5% fee from each pot saves up and buys the cheapest zkSNARK on Zilkroad. Once a week, one goes to a random ticket from that week’s pots, on top of the daily prize.</p>
+        <h2 id="tr-h">zkSNARK raffles</h2>
+        <p class="tr-sub">The 5% fee from each pot saves up and buys the cheapest zkSNARK on Zilkroad. Each one is raffled: every ticket bought while the raffle runs, usually 48 hours, is entered. That’s on top of the daily ZEC draw, which carries on as usual.</p>
       </div>
       <div class="tr-grid">
         <div>
@@ -203,11 +221,12 @@
           <p class="tr-nums" id="tr-nums"></p>
         </div>
         <div>
-          <p class="tr-label">Up for grabs</p>
+          <p class="tr-label">Waiting for a raffle</p>
           <p class="tr-snarks" id="tr-snarks">None yet</p>
-          <p class="tr-nums" id="tr-bonus"></p>
+          <p class="tr-nums" id="tr-next"></p>
         </div>
       </div>
+      <ul class="past raffle-past" id="raffle-past" aria-label="Past raffles"></ul>
     </section>
 
     <section class="panel past-panel" aria-labelledby="past-h">
@@ -223,6 +242,7 @@
         <button type="button" data-mine="10">Mine 10 blocks</button>
         <button type="button" data-mine="40">Close today’s pot and draw</button>
         <button type="button" id="mock-gift">Top up the treasury</button>
+        <button type="button" id="mock-raffle">Open a zkSNARK raffle</button>
       </div>
     </section>
   </main>

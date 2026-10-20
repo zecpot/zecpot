@@ -4,7 +4,7 @@ zecPOT is a daily private ZEC pot. You buy tickets at **0.01 ZEC** each, as many
 
 Once a day, one ticket is drawn from a future Zcash block hash. The winning ticket takes the whole pot, minus a **5% fee**, paid in ZEC to a shielded address.
 
-The fee goes to a public treasury. When the treasury can afford it, it **buys the cheapest zkSNARK on Zilkroad**. Every week, one of those zkSNARKs goes to a random ticket from that week's pots.
+The fee goes to a public treasury. When the treasury can afford it, it **buys the cheapest zkSNARK on Zilkroad**, and each one is **raffled**: every ticket bought while the raffle runs (48 hours by default) is entered, on top of the daily draw.
 
 Nobody, including the operator, learns who bought a ticket or who won.
 
@@ -24,13 +24,13 @@ The demo panel at the bottom of the page lets you add other people's tickets, mi
 1. Buy tickets and click **Simulate this payment**.
 2. Click **Close today's pot and draw**.
 3. Paste your ticket code under **Check your tickets**. If you won, claim the prize with any shielded address. The mock chain accepts any `u1…` address.
-4. Click **Top up the treasury**, then mine blocks. The treasury sweeps a zkSNARK, and every third mock pot draws it as a bonus. Claim it with an ID shaped like `ZR-7K4Q-M2XD`.
+4. Click **Top up the treasury**, then mine blocks so the treasury buys a zkSNARK. Click **Open a zkSNARK raffle**, buy tickets, then close a couple of pots. If you win the raffle, claim it with an ID shaped like `ZR-7K4Q-M2XD`.
 
 Other commands:
 
 ```sh
 npm test             # protocol, engine, wallet-output and swap tests
-npm run simulate     # scripted run: 3 pots, a sweep, a bonus, a Zilkroad outage → operator task; then verifies
+npm run simulate     # scripted run: 3 pots, a sweep, a raffle, a Zilkroad outage → operator task; then verifies
 npm run verify -- 2  # re-check a published round file (var/data/rounds/2.json)
 ```
 
@@ -38,7 +38,7 @@ npm run verify -- 2  # re-check a published round file (var/data/rounds/2.json)
 
 | Path | What |
 |---|---|
-| `packages/core` | Protocol code shared by the engine, the site and the verifier: ticket keys, memos, ZIP-321, draw, bonus draw, pot split, claim signatures, `verifyRound`/`verifyBonus` |
+| `packages/core` | Protocol code shared by the engine, the site and the verifier: ticket keys, memos, ZIP-321, draw, raffle draw, pot split, claim signatures, `verifyRound`/`verifyRaffle` |
 | `apps/engine` | Pot state machine, payouts, treasury sweeps, operator tasks, JSON store, HTTP server, CLI. Adapters for wallets, chain and Zilkroad (`mock` + real) |
 | `apps/web` | Static site, bundled with esbuild. Self-hosted font. The only outside requests are made when you open the swap |
 | `tools` | Wallet setup scripts for the operator's Mac |
@@ -92,12 +92,18 @@ The live engine runs three zingo-cli wallets. SPEC §5 explains why it needs thr
    ```
    This serves the site and the claim API, and runs a tick every 60 s. For a public site, put it behind a host with access logs off.
    On a public domain, also set `SITE_URL=https://your.domain` in `.env`, so link previews (the `og.png` card) work.
-5. **Operator to-dos.** If Zilkroad is down or the session has expired, sweeps and bonus deliveries become tasks instead of failing:
+5. **Raffles.** When the treasury buys a zkSNARK, `npm run op -- tasks` lists it as ready. Open its raffle when you choose:
+   ```sh
+   npm run op -- raffle 2950         # 48 hours
+   npm run op -- raffle 2950 72      # or any length, in hours
+   ```
+   The window is fixed once it's open. The draw, claim and delivery then happen by themselves.
+6. **Operator to-dos.** If Zilkroad is down or the session has expired, sweeps and raffle deliveries become tasks instead of failing:
    ```sh
    npm run op -- tasks
    npm run op -- done <task id> <zkSNARK #> [txid]
    ```
-   Do them by hand on zilkroad.com. Prizes are paid in ZEC and never wait on Zilkroad.
+   Do them by hand on zilkroad.com. Prizes are paid in ZEC and never wait on Zilkroad. The operator commands only work on the Mac running the server, never through the public site.
 
 A SNARKPOT (v1) state file is migrated automatically on first start.
 

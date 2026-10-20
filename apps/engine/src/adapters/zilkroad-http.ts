@@ -7,7 +7,7 @@
  * Ask @zilkroad_ for an API token before relying on this.
  */
 import { zecToZats } from "../../../../packages/core/src/index.ts";
-import type { Listing, Order, OrderState, ZilkroadAdapter } from "./types.ts";
+import type { Listing, Order, OrderState, SnarkInfo, ZilkroadAdapter } from "./types.ts";
 
 interface TokenRow {
   id: number;
@@ -86,6 +86,24 @@ export class HttpZilkroad implements ZilkroadAdapter {
 
   async transfer(snarkId: number, toAccountId: string) {
     await this.req("POST", "/market/transfers", { snarkId, toAccountId });
+  }
+
+  /** GET /snarks/:id (public) plus its picture from imageUrl, for the raffle card. */
+  async snarkInfo(snarkId: number): Promise<SnarkInfo> {
+    const d = await this.req<{ snark: { name?: string; imageUrl?: string; metadata?: { attributes?: { trait_type: string; value: string }[] } } }>("GET", `/snarks/${snarkId}`);
+    const info: SnarkInfo = {
+      name: d.snark?.name ?? `zkSNARKs #${snarkId}`,
+      traits: (d.snark?.metadata?.attributes ?? []).map((a) => ({ trait: String(a.trait_type), value: String(a.value) })).slice(0, 8),
+    };
+    const src = d.snark?.imageUrl;
+    if (src) {
+      const res = await fetch(new URL(src, this.base).toString(), { headers: this.userAgent ? { "user-agent": this.userAgent } : {} });
+      const type = (res.headers.get("content-type") ?? "").split(";")[0]!.trim();
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      // Raster only: an SVG served from our own origin could carry script.
+      if (res.ok && ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(type) && bytes.length < 4_000_000) info.image = { bytes, type };
+    }
+    return info;
   }
 
   async sessionOk() {

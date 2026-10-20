@@ -117,6 +117,30 @@ export class MockZilkroad implements ZilkroadAdapter {
   private guard() {
     if (this.failCalls) throw new Error("zilkroad 403: forbidden");
   }
+  /** A made-up pixel portrait, so the demo raffle card has a picture. */
+  async snarkInfo(snarkId: number) {
+    let x = snarkId * 2654435761 >>> 0;
+    const rnd = () => ((x = (x * 1103515245 + 12345) >>> 0) / 2 ** 32);
+    const hue = Math.floor(rnd() * 360);
+    const cells: string[] = [];
+    for (let y = 2; y < 14; y++) for (let c = 0; c < 6; c++) {
+      if (rnd() < 0.5 - Math.abs(y - 8) * 0.03) {
+        const fill = `hsl(${(hue + 40) % 360} 55% ${45 + Math.floor(rnd() * 25)}%)`;
+        cells.push(`<rect x="${2 + c}" y="${y}" width="1" height="1" fill="${fill}"/><rect x="${13 - c}" y="${y}" width="1" height="1" fill="${fill}"/>`);
+      }
+    }
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges"><rect width="16" height="16" fill="hsl(${hue} 35% 18%)"/>${cells.join("")}<rect x="5" y="7" width="2" height="1" fill="#111"/><rect x="9" y="7" width="2" height="1" fill="#111"/></svg>`;
+    return {
+      name: `zkSNARKs #${snarkId}`,
+      traits: [
+        { trait: "Background", value: ["Black", "Violet", "Teal"][snarkId % 3]! },
+        { trait: "Skin", value: ["Grey", "Gold", "Static"][snarkId % 3]! },
+        { trait: "Eyes", value: ["Blackout", "Glint"][snarkId % 2]! },
+        { trait: "Head", value: ["Drift", "Bare", "Hood"][snarkId % 3]! },
+      ],
+      image: { bytes: new TextEncoder().encode(svg), type: "image/svg+xml" },
+    };
+  }
   async floorZats() {
     return this.book[0]?.priceZats ?? Infinity;
   }

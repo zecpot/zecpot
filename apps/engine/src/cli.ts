@@ -3,10 +3,11 @@
  *   npm run simulate             scripted end-to-end run on the mock chain
  *   npm run serve                live (ZECPOT_MODE=live): site + API + a tick every 60 s
  *   npm run tick                 one live tick, then exit (don't run while serve is running)
- *   npm run op -- tasks          list operator to-dos (manual Zilkroad buys / transfers)
+ *   npm run op -- tasks          list operator to-dos (raffles to open, manual Zilkroad buys / transfers)
+ *   npm run op -- raffle <zkSNARK #> [hours]    open a zkSNARK raffle (default 48 h)
  *   npm run op -- done <n> [zkSNARK #] [txid]   mark a to-do done
  *   npm run blockhash -- <h>     print a block hash from lightwalletd (compare with an explorer)
- *   npm run verify -- <n|file>   re-check a published round
+ *   npm run verify -- <n|file>   re-check a published round (verify -- raffle <n> for a raffle)
  */
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -15,13 +16,14 @@ import {
   DEFAULT_PARAMS,
   newTicketKey,
   parseLine,
-  signBonusClaim,
   signClaim,
+  signRaffleClaim,
   ticketMemo,
-  verifyBonus,
+  verifyRaffle,
   verifyRound,
   zatsToZec,
   type Params,
+  type RaffleRecord,
   type RoundRecord,
 } from "../../../packages/core/src/index.ts";
 import { MockChain, MockWallet, MockZilkroad } from "./adapters/mock.ts";
@@ -38,8 +40,10 @@ const STATE = join(VAR, "state.json");
 const WEB = join(ROOT, "apps/web/public");
 const PORT = Number(process.env.PORT ?? 8787);
 
-/** Short rounds, a bonus every 3 rounds and cheap listings so the mock demo moves at human speed. */
-const MOCK_PARAMS: Params = { ...DEFAULT_PARAMS, roundBlocks: 30, seedDelay: 3, reorgSafety: 2, claimWindowBlocks: 200, bonusEveryRounds: 3 };
+/** Short rounds and cheap listings so the mock demo moves at human speed. */
+const MOCK_PARAMS: Params = { ...DEFAULT_PARAMS, roundBlocks: 30, seedDelay: 3, reorgSafety: 2, claimWindowBlocks: 200 };
+/** On the mock chain a raffle lasts this many blocks (about two pots) instead of 48 h. */
+const MOCK_RAFFLE_BLOCKS = 45;
 const MOCK_TREASURY = "u1mocktreasury";
 
 function mockEngine() {
@@ -94,16 +98,30 @@ async function simulate() {
     const claim = engine.submitClaim(n, r.winner!, SHIELDED_DEMO, signClaim(w.code, n, r.winner!, SHIELDED_DEMO, r.split!.prizeZats));
     await engine.tick();
     say(`  claimed: ${claim.ok}; paid: ${engine.round(n)!.status === "paid"}; treasury now ${zatsToZec(treasury.balanceZats)} ZEC; zkSNARKs held ${JSON.stringify(engine.state.treasurySnarks)}`);
-    if (r.bonus) {
-      const lines = r.bonus.rounds.flatMap((x) => engine.round(x)!.tickets);
-      const bk = allKeys.find((k) => k.pk === parseLine(lines[r.bonus!.winner]!).pk)!;
-      const acct = "ZR-7K4Q-M2XD";
-      const bc = engine.submitBonusClaim(n, r.bonus.winner, acct, signBonusClaim(bk.code, n, r.bonus.winner, acct, r.bonus.snarkId));
-      await engine.tick();
-      say(`  weekly bonus: zkSNARK #${r.bonus.snarkId} → ticket ${r.bonus.winner} of ${lines.length}; claimed ${bc.ok}; ${r.bonus.status}; transfers ${JSON.stringify(market.transfers)}`);
-      ok &&= bc.ok && r.bonus.status === "delivered";
+    if (n === 2 && engine.state.treasurySnarks.length) {
+      const snarkId = engine.state.treasurySnarks[0]!;
+      const opened = await engine.openRaffle(snarkId, { blocks: MOCK_RAFFLE_BLOCKS });
+      say(`  operator opens raffle ${opened.raffle} for zkSNARK #${snarkId}: tickets bought until block ${opened.closeHeight} are entered`);
+      ok &&= opened.ok;
     }
     ok &&= claim.ok && engine.round(n)!.status === "paid";
+  }
+
+  // the raffle window has ended by now: draw it, claim it, deliver it
+  const rf = engine.state.raffles[0];
+  if (rf) chain.mine(Math.max(0, rf.closeHeight - chain.tip) + P.seedDelay + P.reorgSafety);
+  await engine.tick();
+  await engine.tick();
+  if (rf?.winner !== undefined) {
+    const k = allKeys.find((x) => x.pk === parseLine(rf.tickets[rf.winner!]!).pk)!;
+    const acct = "ZR-7K4Q-M2XD";
+    const rc = engine.submitRaffleClaim(rf.raffle, rf.winner, acct, signRaffleClaim(k.code, rf.raffle, rf.winner, acct, rf.snarkId));
+    await engine.tick();
+    say(`Raffle ${rf.raffle}: zkSNARK #${rf.snarkId} → ticket ${rf.winner} of ${rf.tickets.length}; claimed ${rc.ok}; ${rf.status}; transfers ${JSON.stringify(market.transfers)}`);
+    ok &&= rc.ok && rf.status === "delivered";
+  } else {
+    say(`Raffle: ${rf ? rf.status : "never opened"}`);
+    ok = false;
   }
 
   say("Zilkroad goes down: the next sweep becomes an operator to-do instead of failing");
@@ -119,14 +137,13 @@ async function simulate() {
   for (let n = 1; n <= 3; n++) {
     const pub = JSON.parse(await readFile(join(DATA, "rounds", `${n}.json`), "utf8")) as RoundRecord;
     const v = verifyRound(pub);
-    if (pub.bonus) {
-      const byRound: Record<number, string[]> = {};
-      for (const x of pub.bonus.rounds) byRound[x] = (JSON.parse(await readFile(join(DATA, "rounds", `${x}.json`), "utf8")) as RoundRecord).tickets;
-      const vb = verifyBonus(pub, byRound);
-      v.checks.push(...vb.checks);
-      v.ok &&= vb.ok;
-    }
     say(`  verify rounds/${n}.json: ${v.ok ? "PASS" : "FAIL"} (${v.checks.map((c) => c.name).join(", ")})`);
+    ok &&= v.ok;
+  }
+  for (const r of engine.state.raffles) {
+    const pub = JSON.parse(await readFile(join(DATA, "raffles", `${r.raffle}.json`), "utf8")) as RaffleRecord;
+    const v = verifyRaffle(pub);
+    say(`  verify raffles/${r.raffle}.json: ${v.ok ? "PASS" : "FAIL"} (${v.checks.map((c) => c.name).join(", ")})`);
     ok &&= v.ok;
   }
   say(`Public data written to ${DATA}`);
@@ -134,26 +151,32 @@ async function simulate() {
 }
 
 /** API routes shared by the mock and live servers. `apply` runs a state change and republishes. */
-function apiRoutes(engine: Engine, apply: <T extends { ok: boolean }>(fn: () => T) => Promise<{ status: number; json: unknown }>, operatorToken: string) {
+type Apply = <T extends { ok: boolean }>(fn: () => T | Promise<T>) => Promise<{ status: number; json: unknown }>;
+
+function apiRoutes(engine: Engine, apply: Apply, operatorToken: string) {
   const routes: Record<string, Handler> = {
     "/api/claim": async (b) => {
       const { round, ticket, to, sig } = b as Record<string, string>;
       return apply(() => engine.submitClaim(Number(round), Number(ticket), String(to), String(sig)));
     },
-    "/api/bonus-claim": async (b) => {
-      const { round, ticket, to, sig } = b as Record<string, string>;
-      return apply(() => engine.submitBonusClaim(Number(round), Number(ticket), String(to), String(sig)));
+    "/api/raffle-claim": async (b) => {
+      const { raffle, ticket, to, sig } = b as Record<string, string>;
+      return apply(() => engine.submitRaffleClaim(Number(raffle), Number(ticket), String(to), String(sig)));
     },
     "/api/withdraw": async (b) => {
       const { round, pk, to, sig } = b as Record<string, string>;
       return apply(() => engine.submitWithdraw(Number(round), String(pk), String(to), String(sig)));
     },
     "/api/operator": async (b) => {
-      const { token, action, id, snarkId, txid } = b as Record<string, string>;
+      const { token, action, id, snarkId, txid, hours } = b as Record<string, string>;
       if (!operatorToken || token !== operatorToken) return { status: 403, json: { ok: false, error: "bad operator token" } };
-      if (action === "tasks") return { status: 200, json: { ok: true, tasks: engine.openTasks() } };
+      if (action === "tasks") return { status: 200, json: { ok: true, tasks: engine.openTasks(), treasurySnarks: engine.state.treasurySnarks } };
       if (action === "done") return apply(() => engine.completeTask(Number(id), { snarkId: snarkId ? Number(snarkId) : undefined, txid: txid || undefined }));
-      return { status: 400, json: { ok: false, error: "action is tasks or done" } };
+      if (action === "raffle") {
+        const blocks = engine.state.mode === "mock" && !hours ? MOCK_RAFFLE_BLOCKS : undefined;
+        return apply(() => engine.openRaffle(Number(snarkId), { hours: hours ? Number(hours) : undefined, blocks }));
+      }
+      return { status: 400, json: { ok: false, error: "action is tasks, raffle or done" } };
     },
   };
   return routes;
@@ -166,8 +189,8 @@ async function serveMock() {
     await publish(DATA, engine);
   };
   await step();
-  const apply = async <T extends { ok: boolean }>(fn: () => T) => {
-    const out = fn();
+  const apply: Apply = async (fn) => {
+    const out = await fn();
     await step();
     return { status: out.ok ? 200 : 400, json: out };
   };
@@ -194,6 +217,13 @@ async function serveMock() {
         for (let i = 0; i < n; i++) chain.pay(MOCK_PARAMS.ticketZats * (1 + (i % 3)), ticketMemo(newTicketKey().pk));
         await step();
         return { status: 200, json: { ok: true } };
+      },
+      "/api/mock/raffle": async () => {
+        const snarkId = engine.state.treasurySnarks[0];
+        if (snarkId === undefined) return { status: 400, json: { ok: false, error: "the treasury holds no zkSNARK yet: top it up and mine a few blocks" } };
+        const out = await engine.openRaffle(snarkId, { blocks: MOCK_RAFFLE_BLOCKS });
+        await step();
+        return { status: out.ok ? 200 : 400, json: out };
       },
       "/api/mock/treasury": async () => {
         treasury.balanceZats += 5_000_000; // a gift, so a sweep can be seen in the demo
@@ -278,9 +308,9 @@ async function serveLive() {
       .catch((e) => console.error(new Date().toISOString(), "tick failed:", (e as Error).message))
       .finally(() => setTimeout(loop, every));
   loop();
-  const apply = <T extends { ok: boolean }>(fn: () => T) =>
+  const apply: Apply = (fn) =>
     run(async () => {
-      const out = fn();
+      const out = await fn();
       if (out.ok) {
         await saveState(STATE, engine.state);
         await publish(DATA, engine);
@@ -294,20 +324,32 @@ async function serveLive() {
 
 /** Talks to the running server's operator API. */
 async function op(args: string[]) {
-  const [action, id, snarkId, txid] = args;
-  if (action !== "tasks" && action !== "done") throw new Error("usage: npm run op -- tasks | done <task> [zkSNARK #] [txid]");
+  const [action, a1, a2, a3] = args;
+  const usage = "usage: npm run op -- tasks | raffle <zkSNARK #> [hours] | done <task> [zkSNARK #] [txid]";
+  if (action !== "tasks" && action !== "done" && action !== "raffle") throw new Error(usage);
+  const body =
+    action === "raffle"
+      ? { action, snarkId: (a1 ?? "").replace(/^#/, ""), hours: a2 }
+      : { action, id: a1, snarkId: a2, txid: a3 };
+  if (action === "raffle" && !/^\d+$/.test(body.snarkId ?? "")) throw new Error(usage);
   const token = process.env.OPERATOR_TOKEN ?? (process.env.ZECPOT_MODE === "live" || process.env.SNARKPOT_MODE === "live" ? "" : "mock");
   const res = await fetch(`http://127.0.0.1:${PORT}/api/operator`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token, action, id, snarkId, txid }),
+    body: JSON.stringify({ token, ...body }),
   });
-  const out = (await res.json()) as { ok: boolean; error?: string; tasks?: { id: number; kind: string; detail: string; createdAt: string }[] };
+  const out = (await res.json()) as {
+    ok: boolean; error?: string; raffle?: number; closeHeight?: number; treasurySnarks?: number[];
+    tasks?: { id: number; kind: string; detail: string; createdAt: string }[];
+  };
   if (!out.ok) throw new Error(out.error ?? `HTTP ${res.status}`);
   if (action === "tasks") {
     if (!out.tasks?.length) console.log("No open tasks.");
     for (const t of out.tasks ?? []) console.log(`#${t.id} [${t.kind}] ${t.createdAt}\n   ${t.detail}`);
-  } else console.log(`Task ${id} marked done.`);
+    console.log(`zkSNARKs in the treasury, ready to raffle: ${out.treasurySnarks?.map((x) => "#" + x).join(", ") || "none"}`);
+  } else if (action === "raffle") {
+    console.log(`Raffle ${out.raffle} is open for zkSNARK #${body.snarkId}. Tickets bought until block ${out.closeHeight?.toLocaleString("en")} are entered (about ${a2 ?? 48} h).`);
+  } else console.log(`Task ${a1} marked done.`);
 }
 
 async function blockhash(arg?: string) {
@@ -316,17 +358,13 @@ async function blockhash(arg?: string) {
   process.exit(0);
 }
 
-async function verify(arg?: string) {
-  if (!arg) throw new Error("usage: npm run verify -- <round number | path/to/round.json>");
-  const path = /^\d+$/.test(arg) ? join(DATA, "rounds", `${arg}.json`) : arg;
-  const r = JSON.parse(await readFile(path, "utf8")) as RoundRecord;
-  const v = verifyRound(r);
-  const checks = [...v.checks];
-  if (r.bonus) {
-    const byRound: Record<number, string[]> = {};
-    for (const n of r.bonus.rounds) byRound[n] = (JSON.parse(await readFile(join(dirname(path), `${n}.json`), "utf8")) as RoundRecord).tickets;
-    checks.push(...verifyBonus(r, byRound).checks);
-  }
+async function verify(args: string[]) {
+  const raffle = args[0] === "raffle";
+  const arg = raffle ? args[1] : args[0];
+  if (!arg) throw new Error("usage: npm run verify -- <round number | path/to/round.json> | raffle <n>");
+  const path = /^\d+$/.test(arg) ? join(DATA, raffle ? "raffles" : "rounds", `${arg}.json`) : arg;
+  const rec = JSON.parse(await readFile(path, "utf8")) as RoundRecord | RaffleRecord;
+  const checks = ("raffle" in rec ? verifyRaffle(rec) : verifyRound(rec)).checks;
   for (const c of checks) console.log(`${c.ok ? "✓" : "✗"} ${c.name}: ${c.detail}`);
   const ok = checks.every((c) => c.ok);
   console.log(ok ? "PASS" : "FAIL");
@@ -340,7 +378,7 @@ const cmds: Record<string, () => Promise<void>> = {
   serve: live ? serveLive : serveMock,
   tick: tickLive,
   op: () => op(rest),
-  verify: () => verify(rest[0]),
+  verify: () => verify(rest),
   blockhash: () => blockhash(rest[0]),
 };
 (cmds[cmd ?? ""] ?? (async () => console.log("commands: serve | simulate | tick | op | verify <n> | blockhash <h>")))().catch((e) => {

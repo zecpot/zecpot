@@ -3,23 +3,24 @@ import { initSwap } from "./swap/ui.ts";
 import {
   keyFromCode,
   newTicketKey,
-  signBonusClaim,
+  signRaffleClaim,
   signClaim,
   signWithdraw,
   ticketMemo,
-  verifyBonus,
+  verifyRaffle,
   verifyRound,
   withdrawAmountZats,
   withdrawFeeZats,
   zatsToZec,
   zip321Uri,
+  type RaffleRecord,
   type RoundRecord,
   type TicketKey,
   type VerifyResult,
 } from "../../../packages/core/src/index.ts";
 
 interface PublicState {
-  params: { ticketZats: number; roundBlocks: number; feeBps: number; bonusEveryRounds: number; claimWindowBlocks: number; feePerActionZats: number };
+  params: { ticketZats: number; roundBlocks: number; feeBps: number; claimWindowBlocks: number; feePerActionZats: number };
   poolAddress: string;
   viewingKey: string;
   mode: "mock" | "live";
@@ -33,7 +34,6 @@ interface PublicState {
     sweepTargetZats: number | null;
     snarks: number[];
     sweeps: { snarkId: number; priceZats: number; at: string }[];
-    nextBonusRound: number;
   };
   rounds: {
     round: number;
@@ -42,8 +42,19 @@ interface PublicState {
     potZats: number;
     winner: number | null;
     prizeZats: number | null;
-    bonus: { snarkId: number; status: string; winner: number; ticketCount: number } | null;
   }[];
+  raffles: RaffleSummary[];
+}
+
+interface RaffleSummary {
+  raffle: number;
+  snarkId: number;
+  status: RaffleRecord["status"];
+  openHeight: number;
+  closeHeight: number;
+  tickets: number;
+  winner: number | null;
+  snark: RaffleRecord["snark"] | null;
 }
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -146,16 +157,19 @@ async function roundFile(n: number) {
 const pkOf = (line: string) => line.slice(line.lastIndexOf(":") + 1);
 
 async function verifyFull(rec: RoundRecord): Promise<VerifyResult> {
-  const v = verifyRound(rec);
-  if (rec.bonus) {
-    const byRound: Record<number, string[]> = {};
-    for (const x of rec.bonus.rounds) byRound[x] = (rounds.get(x) ?? (await roundFile(x))).tickets;
-    const vb = verifyBonus(rec, byRound);
-    v.checks.push(...vb.checks);
-    v.ok &&= vb.ok;
-  }
-  return v;
+  return verifyRound(rec);
 }
+
+const raffles = new Map<number, RaffleRecord>();
+async function raffleFile(n: number) {
+  const r = await getJSON<RaffleRecord>(`/data/raffles/${n}.json`);
+  raffles.set(n, r);
+  return r;
+}
+/** The raffle the page features: the open one, else the latest result for about two days after it closed. */
+const featuredRaffle = (s: PublicState) =>
+  s.raffles.find((r) => r.status === "open") ??
+  [...s.raffles].reverse().find((r) => r.status !== "empty" && (r.status === "drawn" || r.status === "closed" || s.scannedHeight < r.closeHeight + 2 * s.params.roundBlocks));
 
 /* ---------------- hero ---------------- */
 
@@ -264,6 +278,11 @@ function renderOdds() {
     : s.open.potZats + Math.floor(n * t * feeShare) - 6 * fee;
   row("Prize if you win, about", zec(prize));
   row(others ? "Your chance if nobody else joins" : "Your chance right now", `${have + n} in ${others + n} (${pct(have + n, others + n)})`);
+  const rf = s.raffles.find((r) => r.status === "open");
+  if (rf) {
+    const mine = myRaffleEntries(rf);
+    row(`zkSNARK #${rf.snarkId} raffle chance`, `${mine + n} in ${rf.tickets + n} (${pct(mine + n, rf.tickets + n)})`);
+  }
 }
 
 function startBuy(e: Event) {
@@ -305,7 +324,6 @@ async function renderLatest(s: PublicState) {
       : "Waiting for the winner to claim it.";
   const line = $("latest-line");
   line.replaceChildren(`Pot ${last.round}: ticket ${ticketNo(last.winner)} of ${last.tickets} took `, el("strong", { textContent: last.prizeZats !== null ? zec(last.prizeZats) : "the pot" }), `. ${status}`);
-  if (last.bonus) line.append(` The weekly bonus, zkSNARK #${last.bonus.snarkId}, went to ticket ${ticketNo(last.bonus.winner)} of the week’s ${last.bonus.ticketCount}.`);
 
   const proof = $("latest-proof");
   try {
@@ -369,12 +387,111 @@ function renderTreasury(s: PublicState) {
   for (const id of t.snarks) {
     held.append(el("a", { href: `https://zilkroad.com/explorer/${id}`, target: "_blank", rel: "noopener noreferrer", textContent: `zkSNARK #${id}` }), " ");
   }
-  const roundsLeft = t.nextBonusRound - s.open.round;
-  $("tr-bonus").textContent =
-    t.snarks.length > 0
-      ? `Drawn with pot ${t.nextBonusRound}, ${roundsLeft === 0 ? "today" : `in ${plural(roundsLeft, "day")}`}. Every ticket from pot ${t.nextBonusRound - s.params.bonusEveryRounds + 1} to pot ${t.nextBonusRound} has a chance, including ones that didn’t win their day.`
-      : `The weekly draw starts once the treasury holds a zkSNARK. The next one could be with pot ${t.nextBonusRound}.`;
+  const open = s.raffles.find((r) => r.status === "open");
+  $("tr-next").textContent = open
+    ? `zkSNARK #${open.snarkId} is being raffled right now.${t.snarks.length ? " The next one is raffled after it." : ""}`
+    : t.snarks.length
+      ? "Its raffle opens soon. Every ticket bought while it runs is entered."
+      : "The next raffle opens once the treasury has bought a zkSNARK.";
   $("tr-key").textContent = t.viewingKey;
+}
+
+async function renderRafflePast(s: PublicState) {
+  const done = s.raffles.filter((r) => r.status !== "open").slice(-10).reverse();
+  const rows = await Promise.all(done.map(async (r) => {
+    const what = el("span");
+    const badge = el("span");
+    if (r.status === "empty") what.textContent = `zkSNARK #${r.snarkId}: no tickets, so it went back to the treasury`;
+    else if (r.winner === null) what.textContent = `zkSNARK #${r.snarkId}: ${plural(r.tickets, "ticket")}, waiting for the draw block`;
+    else {
+      const tail = r.status === "delivered" ? "delivered" : r.status === "claimed" ? "being delivered" : r.status === "expired" ? "unclaimed, back to the treasury" : "waiting for the winner to claim";
+      what.textContent = `zkSNARK #${r.snarkId} to ticket ${ticketNo(r.winner)} of ${r.tickets}, ${tail}`;
+      try {
+        const v = verifyRaffle(await raffleFile(r.raffle));
+        badge.className = v.ok ? "verified" : "failed";
+        badge.textContent = v.ok ? "Verified" : "Check failed";
+        badge.title = v.checks.map((c) => `${c.ok ? "ok" : "FAIL"} ${c.name}: ${c.detail}`).join("\n");
+      } catch {
+        badge.className = "failed";
+        badge.textContent = "Raffle file missing";
+      }
+    }
+    return el("li", {}, el("span", { className: "n", textContent: `Raffle ${r.raffle}` }), what, badge);
+  }));
+  $("raffle-past").replaceChildren(...rows);
+}
+
+/* ---------------- the zkSNARK raffle card ---------------- */
+
+let raffleCloseAt = 0;
+let raffleShown = "";
+async function renderRaffle(s: PublicState) {
+  const r = featuredRaffle(s);
+  const box = $("raffle");
+  if (!r) { box.hidden = true; return; }
+  box.hidden = false;
+  const key = `${r.raffle}:${r.snark?.image ?? ""}`;
+  if (key !== raffleShown) {
+    raffleShown = key;
+    const img = $<HTMLImageElement>("raffle-img");
+    img.hidden = !r.snark?.image;
+    if (r.snark?.image) { img.src = r.snark.image; img.alt = r.snark.name; }
+    $("raffle-ph").textContent = `#${r.snarkId}`;
+    $("raffle-traits").replaceChildren(...(r.snark?.traits ?? []).map((t) => el("li", {}, `${t.trait} `, el("b", { textContent: t.value }))));
+  }
+  const open = r.status === "open";
+  $("raffle-kicker").textContent = open ? `zkSNARK raffle ${r.raffle}, open now` : `zkSNARK raffle ${r.raffle}`;
+  $("raffle-h").textContent = open ? `Win zkSNARK #${r.snarkId}` : `zkSNARK #${r.snarkId}`;
+  const mine = open ? myRaffleEntries(r) : 0;
+  const sub = $("raffle-sub");
+  sub.replaceChildren();
+  const proof = $("raffle-proof");
+  proof.replaceChildren();
+  $("raffle-clock-box").hidden = !(open || r.status === "closed");
+  if (open) {
+    sub.append(
+      "Every ticket you buy before the raffle closes is also entered here, on top of the daily ZEC draw. ",
+      el("strong", { textContent: `${plural(r.tickets, "ticket")} entered so far` }),
+      mine ? `, ${mine} of them yours.` : ".",
+    );
+    const left = r.closeHeight - s.scannedHeight;
+    if (!isMock()) {
+      const est = Date.now() + left * BLOCK_SECONDS * 1000;
+      if (!raffleCloseAt || Math.abs(est - raffleCloseAt) > 90_000) raffleCloseAt = est;
+    }
+  } else if (r.status === "closed") {
+    sub.append(`Closed with ${plural(r.tickets, "ticket")}. The winner is picked a few blocks later.`);
+  } else if (r.winner !== null) {
+    const tail = r.status === "delivered" ? "It has been delivered." : r.status === "claimed" ? "The winner claimed it; it’s being delivered." : r.status === "expired" ? "Nobody claimed it, so it went back to the treasury." : "Waiting for the winner to claim it.";
+    sub.append(`Ticket ${ticketNo(r.winner)} of ${r.tickets} won it. ${tail}`);
+    try {
+      const v = verifyRaffle(raffles.get(r.raffle) ?? (await raffleFile(r.raffle)));
+      proof.append(el("span", { className: v.ok ? "verified" : "failed", textContent: v.ok ? "Verified in your browser." : "This browser’s check failed." }), v.ok ? " It recomputed the entry list and the winner from the block hash." : "");
+    } catch { /* file not published yet */ }
+  }
+  tickRaffleClock();
+}
+
+function myRaffleEntries(r: RaffleSummary) {
+  const rec = raffles.get(r.raffle);
+  if (!rec) return 0;
+  const pks = new Set(deviceKeys().map((k) => k.pk));
+  return rec.tickets.filter((l) => pks.has(pkOf(l))).length;
+}
+
+function tickRaffleClock() {
+  if (!state) return;
+  const r = featuredRaffle(state);
+  if (!r || $("raffle-clock-box").hidden) return;
+  const label = $("raffle-clock-label");
+  const time = $("raffle-clock");
+  const left = r.closeHeight - state.scannedHeight;
+  if (r.status !== "open" || left <= 0) { label.textContent = "Raffle closed"; time.textContent = "Drawing soon"; return; }
+  label.textContent = "Raffle closes in";
+  if (isMock()) { time.textContent = plural(left, "block"); return; }
+  const secs = Math.max(0, Math.round((raffleCloseAt - Date.now()) / 1000));
+  const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60), sec = secs % 60;
+  time.textContent = d > 0 ? `${d}d ${h}h ${String(m).padStart(2, "0")}m` : h > 0 ? `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s` : `${m}m ${String(sec).padStart(2, "0")}s`;
 }
 
 async function renderPast(s: PublicState) {
@@ -393,7 +510,6 @@ async function renderPast(s: PublicState) {
       else {
         const tail = r.status === "paid" ? "paid" : r.status === "claimed" ? "being paid" : r.status === "expired" ? "unclaimed, rolled into a later pot" : "waiting for the winner to claim";
         what.textContent = `Ticket ${ticketNo(r.winner)} of ${r.tickets} won ${r.prizeZats !== null ? zec(r.prizeZats) : "the pot"}, ${tail}`;
-        if (r.bonus) what.append(el("small", { textContent: `Bonus: zkSNARK #${r.bonus.snarkId} to ticket ${ticketNo(r.bonus.winner)} of the week’s ${r.bonus.ticketCount}, ${r.bonus.status}.` }));
         try {
           const v = await verifyFull(await roundFile(r.round));
           badge.className = v.ok ? "verified" : "failed";
@@ -414,7 +530,6 @@ async function renderPast(s: PublicState) {
 
 interface Found {
   round: number;
-  rec: RoundRecord;
   head: string;
   tag: string;
   won: boolean;
@@ -429,12 +544,12 @@ function scan(keys: TicketKey[], recs: RoundRecord[]): Found[] {
   for (const r of [...recs].sort((a, b) => b.round - a.round)) {
     for (const w of r.withdrawn ?? []) {
       const n = w.tickets.filter((l) => byPk.has(pkOf(l))).length;
-      if (n) out.push({ round: r.round, rec: r, head: `Pot ${r.round}`, tag: "withdrawn", won: false, detail: [`${plural(n, "ticket")} withdrawn. ${zec(w.amountZats)} ${w.txid ? "was sent" : "is being sent"} to the address you gave.`] });
+      if (n) out.push({ round: r.round, head: `Pot ${r.round}`, tag: "withdrawn", won: false, detail: [`${plural(n, "ticket")} withdrawn. ${zec(w.amountZats)} ${w.txid ? "was sent" : "is being sent"} to the address you gave.`] });
     }
     const idx = r.tickets.map((l, i) => (byPk.has(pkOf(l)) ? i : -1)).filter((i) => i >= 0);
     if (idx.length) {
       const n = idx.length;
-      const f: Found = { round: r.round, rec: r, head: `Pot ${r.round}: ${plural(n, "ticket")}`, tag: "", won: false, detail: [] };
+      const f: Found = { round: r.round, head: `Pot ${r.round}: ${plural(n, "ticket")}`, tag: "", won: false, detail: [] };
       const winKey = r.winner !== undefined ? byPk.get(pkOf(r.tickets[r.winner] ?? "")) : undefined;
       if (r.status === "open") {
         f.tag = "in today’s draw";
@@ -470,27 +585,44 @@ function scan(keys: TicketKey[], recs: RoundRecord[]): Found[] {
       }
       out.push(f);
     }
-    if (r.bonus) {
-      const lines = r.bonus.rounds.flatMap((x) => recs.find((y) => y.round === x)?.tickets ?? rounds.get(x)?.tickets ?? []);
-      const k = byPk.get(pkOf(lines[r.bonus.winner] ?? ""));
-      if (k) {
-        const b = r.bonus;
-        const f: Found = { round: r.round, rec: r, head: `Weekly bonus: you won zkSNARK #${b.snarkId}`, tag: b.status === "drawn" ? "you won" : b.status, won: true, detail: [] };
-        if (b.status === "drawn") {
-          f.detail.push("Claim it at the top of the page with a Zilkroad account ID.");
-          f.banner = el("section", { className: "win" },
-            el("h2", { textContent: `You won zkSNARK #${b.snarkId}` }),
-            el("p", { textContent: `One of your tickets won this week’s bonus draw. Claim it to your Zilkroad account within 14 days.` }),
-            bonusForm(k, r));
-        }
-        if (b.status === "claimed") f.detail.push("Claimed. It’s being transferred to your Zilkroad account.");
-        if (b.status === "delivered") f.detail.push("Delivered to your Zilkroad account.");
-        if (b.status === "expired") f.detail.push("The claim window closed, so it went back to the treasury.");
-        out.push(f);
-      }
-    }
   }
   return out;
+}
+
+/** Raffle entries and wins for these ticket codes. */
+function scanRaffles(keys: TicketKey[], recs: RaffleRecord[]): Found[] {
+  const byPk = new Map(keys.map((k) => [k.pk, k]));
+  const out: Found[] = [];
+  for (const r of [...recs].sort((a, b) => b.raffle - a.raffle)) {
+    const n = r.tickets.filter((l) => byPk.has(pkOf(l))).length;
+    if (!n) continue;
+    const k = r.winner !== undefined ? byPk.get(pkOf(r.tickets[r.winner] ?? "")) : undefined;
+    const f: Found = { round: -r.raffle, head: `zkSNARK #${r.snarkId} raffle: ${n} ${n === 1 ? "entry" : "entries"}`, tag: "", won: false, detail: [] };
+    if (r.status === "open") { f.tag = "in the raffle"; f.detail.push(`That’s ${n} of the ${r.tickets.length} entries so far.`); }
+    else if (r.status === "closed") { f.tag = "drawing soon"; f.detail.push("The winner is picked a few blocks after the raffle closed."); }
+    else if (!k) { f.tag = "not this time"; if (r.winner !== undefined) f.detail.push(`Ticket ${ticketNo(r.winner)} of ${r.tickets.length} won it.`); }
+    else {
+      f.won = true;
+      f.head = `You won zkSNARK #${r.snarkId}`;
+      f.tag = r.status === "drawn" ? "you won" : r.status === "claimed" ? "won, being delivered" : r.status === "delivered" ? "won, delivered" : "won, unclaimed";
+      if (r.status === "drawn") {
+        f.detail.push("Claim it at the top of the page with a Zilkroad account ID.");
+        f.banner = el("section", { className: "win" },
+          el("h2", { textContent: `You won zkSNARK #${r.snarkId}` }),
+          el("p", { textContent: `Your ticket ${ticketNo(r.winner!)} of ${r.tickets.length} won raffle ${r.raffle}. Claim it to your Zilkroad account within 14 days.` }),
+          raffleForm(k, r));
+      }
+      if (r.status === "claimed") f.detail.push("Claimed. It’s being transferred to your Zilkroad account.");
+      if (r.status === "delivered") f.detail.push("Delivered to your Zilkroad account.");
+      if (r.status === "expired") f.detail.push("The claim window closed, so it went back to the treasury.");
+    }
+    out.push(f);
+  }
+  return out;
+}
+
+async function raffleRecords(s: PublicState) {
+  return (await Promise.all(s.raffles.slice(-10).map((r) => raffleFile(r.raffle).catch(() => null)))).filter((r): r is RaffleRecord => !!r);
 }
 
 async function recentRecords(s: PublicState) {
@@ -508,7 +640,7 @@ function foundList(found: Found[]) {
 
 async function renderDevice(s: PublicState, force = false) {
   const keys = deviceKeys();
-  const sig = JSON.stringify([keys.length, s.rounds.map((r) => [r.round, r.status, r.tickets, r.bonus?.status])]);
+  const sig = JSON.stringify([keys.length, s.rounds.map((r) => [r.round, r.status, r.tickets]), s.raffles.map((r) => [r.raffle, r.status, r.tickets])]);
   if (!force && sig === deviceSig) return;
   // Don't wipe a claim form someone is filling in; try again on the next refresh
   const typing = Array.from(document.querySelectorAll<HTMLInputElement>("#wins input, #device-out input")).some((i) => i.value || i === document.activeElement);
@@ -521,7 +653,8 @@ async function renderDevice(s: PublicState, force = false) {
     $("wins").replaceChildren();
     return;
   }
-  const found = scan(keys, await recentRecords(s));
+  const [rr, fr] = await Promise.all([recentRecords(s), raffleRecords(s)]);
+  const found = [...scanRaffles(keys, fr), ...scan(keys, rr)];
   $("wins").replaceChildren(...found.filter((f) => f.banner).map((f) => f.banner!));
 
   const tools = el("div", { className: "device-tools" },
@@ -560,7 +693,8 @@ async function checkPasted(e: Event) {
     return;
   }
   if (!state) return;
-  const found = scan([key], await recentRecords(state));
+  const [rr, fr] = await Promise.all([recentRecords(state), raffleRecords(state)]);
+  const found = [...scanRaffles([key], fr), ...scan([key], rr)];
   if (found.length === 0) {
     out.append(el("p", { className: "fine", textContent: "No tickets for this code yet. A payment shows up a few minutes after it’s mined." }));
     return;
@@ -625,23 +759,22 @@ function prizeForm(key: TicketKey, r: RoundRecord) {
   return f;
 }
 
-function bonusForm(key: TicketKey, r: RoundRecord) {
-  const b = r.bonus!;
-  const id = `bto${++formSeq}`;
-  const f = el("form", { className: "claim bonus" });
+function raffleForm(key: TicketKey, r: RaffleRecord) {
+  const id = `rto${++formSeq}`;
+  const f = el("form", { className: "claim raffle-claim" });
   f.innerHTML = `
-    <label for="${id}">Zilkroad account ID to send zkSNARK #${b.snarkId} to. A fresh account keeps this win separate from anything else you own.</label>
-    <div class="inline"><input id="${id}" class="bto" placeholder="ZR-7K4Q-M2XD" autocomplete="off" spellcheck="false" />
-    <button type="submit" class="primary">Claim zkSNARK #${b.snarkId}</button></div>
+    <label for="${id}">Zilkroad account ID to send zkSNARK #${r.snarkId} to. A fresh account keeps this win separate from anything else you own.</label>
+    <div class="inline"><input id="${id}" class="rto" placeholder="ZR-7K4Q-M2XD" autocomplete="off" spellcheck="false" />
+    <button type="submit" class="primary">Claim zkSNARK #${r.snarkId}</button></div>
     <p class="msg" aria-live="polite"></p>`;
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     const msg = f.querySelector(".msg")!;
     const to = (f.querySelector("input") as HTMLInputElement).value.trim().toUpperCase();
     try {
-      const sig = signBonusClaim(key.code, r.round, b.winner, to, b.snarkId);
-      const res = await post("/api/bonus-claim", { round: r.round, ticket: b.winner, to, sig });
-      msg.textContent = res.ok ? `Claimed. zkSNARK #${b.snarkId} will arrive in ${to} soon.` : `Claim not accepted: ${res.error}.`;
+      const sig = signRaffleClaim(key.code, r.raffle, r.winner!, to, r.snarkId); // signed here; the code never leaves the browser
+      const res = await post("/api/raffle-claim", { raffle: r.raffle, ticket: r.winner, to, sig });
+      msg.textContent = res.ok ? `Claimed. zkSNARK #${r.snarkId} will arrive in ${to} soon.` : `Claim not accepted: ${res.error}.`;
       if (res.ok) { f.querySelector("button")!.disabled = true; setTimeout(() => { deviceSig = ""; claimedJustNow = true; refresh(); }, 2500); }
     } catch (err) {
       msg.textContent = `Claim not accepted: ${(err as Error).message}.`;
@@ -659,10 +792,12 @@ async function refresh() {
   try {
     state = await getJSON<PublicState>("/data/state.json");
     openRec = await roundFile(state.open.round).catch(() => null);
+    const live = state.raffles.find((r) => r.status === "open");
+    if (live) await raffleFile(live.raffle).catch(() => null);
     renderHero(state);
     renderOdds();
     renderTreasury(state);
-    await Promise.all([renderLatest(state), renderPast(state), renderDevice(state)]);
+    await Promise.all([renderRaffle(state), renderLatest(state), renderPast(state), renderRafflePast(state), renderDevice(state)]);
   } catch {
     $("hero-sub").textContent = "Can’t reach the pot data right now. Retrying.";
   } finally {
@@ -712,6 +847,11 @@ document.addEventListener("DOMContentLoaded", () => {
       await refresh();
     }),
   );
+  $("mock-raffle").addEventListener("click", async () => {
+    const r = await post("/api/mock/raffle", {});
+    toast(r.ok ? "Raffle opened on the demo chain" : `Couldn’t open a raffle: ${r.error}`);
+    await refresh();
+  });
   $("mock-gift").addEventListener("click", async () => { await post("/api/mock/treasury", {}); toast("Treasury topped up on the demo chain"); await refresh(); });
 
   // Swap default: the tickets on the ticket + 0.0002 ZEC for the fee on the payment to the pot.
@@ -720,5 +860,5 @@ document.addEventListener("DOMContentLoaded", () => {
   renderOdds();
   refresh();
   setInterval(refresh, 10_000);
-  setInterval(tickClock, 1000);
+  setInterval(() => { tickClock(); tickRaffleClock(); }, 1000);
 });
