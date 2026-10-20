@@ -4,7 +4,7 @@
 #
 #   ZINGO_BIN=/path/to/zingo-cli ./tools/setup-pool.sh
 #
-# It prints both wallets' recovery phrases and birthdays. Write them down offline: they are
+# It prints both wallets' recovery phrases. Write them down offline: they are
 # the only way to recover the pot if this machine dies.
 #
 # Plain ASCII on purpose: macOS ships bash 3.2, which misreads some UTF-8
@@ -18,13 +18,14 @@ BASE="${SNARKPOT_WALLETS:-$HOME/.snarkpot}"
 command -v "${ZINGO_BIN}" >/dev/null || { echo "zingo-cli not found; set ZINGO_BIN (see README, Going live)" >&2; exit 1; }
 command -v jq >/dev/null || { echo "needs jq: brew install jq" >&2; exit 1; }
 
-# A default zingo-cli build goes online only through the Nym mixnet and needs
-# nym-proxy beside it. A direct-connection build (makers run-cli --nakednet
-# --features nakednet-test-mode) does not. So this is only a warning.
+# zingo-cli goes online only through the Nym mixnet, which needs the nym-proxy
+# binary: beside zingo-cli, in $ZINGO_NYM_PROXY, or on PATH.
 BIN_DIR="$(cd "$(dirname "$(command -v "${ZINGO_BIN}")")" && pwd)"
 if [ ! -x "${BIN_DIR}/nym-proxy" ] && [ ! -x "${ZINGO_NYM_PROXY:-/nonexistent}" ] && ! command -v nym-proxy >/dev/null; then
-  echo "Note: no nym-proxy next to ${BIN_DIR}/zingo-cli. Fine for a direct-connection build;" >&2
-  echo "a default (mixnet) build will fail to go online without it." >&2
+  echo "nym-proxy not found next to ${BIN_DIR}/zingo-cli." >&2
+  echo "Build both with: cd ~/zingolib && makers run-cli --build-only" >&2
+  echo "then: cp target/release/zingo-cli target/release/nym-proxy ${BIN_DIR}/" >&2
+  exit 1
 fi
 
 # Runs one zingo-cli command for wallet $1 and prints only its JSON.
@@ -61,11 +62,8 @@ done
 
 echo
 echo "=== Recovery phrases (write these down on paper, never commit or paste them) ==="
-for wallet in inbox ops; do
-  echo "--- ${wallet}"
-  "${ZINGO_BIN}" --data-dir "${BASE}/${wallet}" --server "${SERVER}" --nosync recovery_info 2>/dev/null \
-    | sed -n 's/^ *seed phrase: /phrase:   /p; s/^ *birthday: /birthday: /p'
-done
+echo "--- inbox"; "${ZINGO_BIN}" --data-dir "${BASE}/inbox" --server "${SERVER}" --nosync recovery_info 2>/dev/null
+echo "--- ops";   "${ZINGO_BIN}" --data-dir "${BASE}/ops"   --server "${SERVER}" --nosync recovery_info 2>/dev/null
 echo
 echo "=== Add to ~/snarkpot/.env ==="
 cat <<EOF
