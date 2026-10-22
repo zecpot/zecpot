@@ -105,6 +105,8 @@ The live engine runs three zingo-cli wallets. SPEC §5 explains why it needs thr
    ```
    Do them by hand on zilkroad.com. Prizes are paid in ZEC and never wait on Zilkroad. The operator commands only work on the Mac running the server, never through the public site.
 
+7. **Run it in the background.** `bash tools/install-services.sh install` sets up the server and the Cloudflare tunnel as launchd services. They start at boot, restart if they stop, run as your user and write logs to `var/logs/`. Use `status`, `logs`, `restart` after changing `.env` or the code, and `uninstall`.
+
 A SNARKPOT (v1) state file is migrated automatically on first start.
 
 ## Known limits

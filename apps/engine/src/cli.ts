@@ -9,6 +9,7 @@
  *   npm run blockhash -- <h>     print a block hash from lightwalletd (compare with an explorer)
  *   npm run verify -- <n|file>   re-check a published round (verify -- raffle <n> for a raffle)
  */
+import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,7 +31,7 @@ import { MockChain, MockWallet, MockZilkroad } from "./adapters/mock.ts";
 import { HttpZilkroad } from "./adapters/zilkroad-http.ts";
 import { LightwalletdChain, ZingoCli, ZingoPool, ZingoTreasury } from "./adapters/zingo.ts";
 import { Engine, initialState, migrateState } from "./engine.ts";
-import { startServer, type Handler } from "./server.ts";
+import { listening, startServer, type Handler } from "./server.ts";
 import { loadState, publish, saveState } from "./store.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -271,6 +272,28 @@ async function liveEngine() {
   return new Engine(state, { wallet, treasury, chain: new LightwalletdChain(server), market });
 }
 
+/**
+ * Only one live engine may touch the wallets: two would pay prizes twice.
+ * A lock file holds the running engine's process id; a stale one (process gone) is replaced.
+ */
+function takeEngineLock() {
+  const path = join(VAR, "engine.lock");
+  mkdirSync(VAR, { recursive: true });
+  if (existsSync(path)) {
+    const pid = Number(readFileSync(path, "utf8").trim());
+    let alive = false;
+    try { if (pid > 0) { process.kill(pid, 0); alive = true; } } catch { /* not running */ }
+    if (alive && pid !== process.pid) {
+      console.error(`zecPOT is already running (process ${pid}). Stop that one first (Ctrl+C in its window, or: kill ${pid}).`);
+      process.exit(1);
+    }
+  }
+  writeFileSync(path, String(process.pid));
+  const release = () => { try { if (readFileSync(path, "utf8").trim() === String(process.pid)) unlinkSync(path); } catch { /* gone */ } };
+  process.on("exit", release);
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => process.exit(0));
+}
+
 /** Serialises ticks and API mutations so state is never changed mid-tick. */
 function serial() {
   let chain = Promise.resolve();
@@ -288,6 +311,7 @@ async function tickOnce(engine: Engine) {
 }
 
 async function tickLive() {
+  takeEngineLock();
   const engine = await liveEngine();
   await tickOnce(engine);
   for (const l of engine.state.log.slice(-10)) console.log(l.at, l.msg);
@@ -295,6 +319,7 @@ async function tickLive() {
 
 /** Live: one process runs the site, the API and a tick every TICK_SECONDS (default 60). */
 async function serveLive() {
+  takeEngineLock();
   const engine = await liveEngine();
   const run = serial();
   const every = Number(process.env.TICK_SECONDS ?? 60) * 1000;
@@ -307,7 +332,6 @@ async function serveLive() {
       })
       .catch((e) => console.error(new Date().toISOString(), "tick failed:", (e as Error).message))
       .finally(() => setTimeout(loop, every));
-  loop();
   const apply: Apply = (fn) =>
     run(async () => {
       const out = await fn();
@@ -317,7 +341,14 @@ async function serveLive() {
       }
       return { status: out.ok ? 200 : 400, json: out as unknown };
     });
-  startServer({ port: PORT, webDir: WEB, dataDir: DATA, post: apiRoutes(engine, apply, process.env.OPERATOR_TOKEN ?? "") });
+  const server = startServer({ port: PORT, webDir: WEB, dataDir: DATA, post: apiRoutes(engine, apply, process.env.OPERATOR_TOKEN ?? "") });
+  try {
+    await listening(server); // bind the port before the first tick touches the wallets
+  } catch (e) {
+    console.error(`Port ${PORT} is busy (${(e as Error).message}). Is another zecPOT running? Find it with: lsof -nP -iTCP:${PORT} -sTCP:LISTEN`);
+    process.exit(1);
+  }
+  loop();
   console.log(`zecPOT (live, ${LIGHTWALLETD()}) → http://localhost:${PORT}`);
   if (!process.env.OPERATOR_TOKEN) console.log("Note: OPERATOR_TOKEN is not set, so `npm run op` is disabled.");
 }

@@ -4,3 +4,7 @@ apps/web/public/app.js.map
 var/
 .env
 *.log
+
+# never commit secrets or editor backups
+.env*
+*.save

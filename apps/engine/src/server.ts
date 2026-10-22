@@ -97,3 +97,12 @@ export function startServer(opts: { port: number; webDir: string; dataDir: strin
   server.listen(opts.port);
   return server;
 }
+
+/** Resolves once the port is bound; rejects (e.g. EADDRINUSE) instead of crashing the process. */
+export function listening(server: ReturnType<typeof createServer>) {
+  return new Promise<void>((ok, fail) => {
+    if (server.listening) return ok();
+    server.once("listening", () => ok());
+    server.once("error", fail);
+  });
+}
